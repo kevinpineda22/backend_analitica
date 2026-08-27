@@ -24,11 +24,14 @@ La API quedara disponible en `http://127.0.0.1:3010/api`.
 
 ## Despliegue en Vercel
 
-1. Importa esta carpeta como un proyecto nuevo en Vercel.
-2. Deja **Framework Preset** en `Other` y la carpeta raiz apuntando a este proyecto.
-3. Registra en **Settings > Environment Variables** todas las variables de `.env.example` excepto `POWER_BI_API_PORT` y `POWER_BI_API_HOST`.
-4. En `POWER_BI_ALLOWED_ORIGINS` registra la URL publica del frontend, sin `/` final. Se aceptan varias URLs separadas por comas.
-5. Despliega y comprueba `https://TU-BACKEND.vercel.app/api/salud`.
-6. En el frontend configura `VITE_POWER_BI_API_URL=https://TU-BACKEND.vercel.app/api` y vuelve a desplegarlo.
+1. Conecta el repositorio `kevinpineda22/backend_analitica` en **Settings > Git**.
+2. Configura `master` como **Production Branch** y `/` como **Root Directory**.
+3. Usa la deteccion automatica de Express. No configures Build Command, Output Directory ni un archivo `vercel.json`.
+4. Registra en **Settings > Environment Variables** todas las variables de `.env.example` excepto `POWER_BI_API_PORT` y `POWER_BI_API_HOST`.
+5. En `POWER_BI_ALLOWED_ORIGINS` registra la URL publica del frontend, sin `/` final. Se aceptan varias URLs separadas por comas.
+6. Haz push a `master` o ejecuta **Redeploy** sobre el ultimo commit.
+7. Comprueba primero `https://TU-BACKEND.vercel.app/`. Debe responder `{ "ok": true, "servicio": "API de analitica" }`.
+8. Comprueba `https://TU-BACKEND.vercel.app/api/salud` para verificar PostgreSQL.
+9. En el frontend configura `VITE_POWER_BI_API_URL=https://TU-BACKEND.vercel.app/api` y vuelve a desplegarlo.
 
 No subas `.env` al repositorio. Si PostgreSQL solo admite ciertas IP, debe aceptar conexiones desde Vercel o utilizar un pooler accesible publicamente. Para produccion se recomienda `POSTGRES_SSLMODE=require` cuando el proveedor lo soporte.

@@ -7,9 +7,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "node --watch server.js",
-    "start": "node server.js",
-    "check": "node --check app.js && node --check api/index.js && node --check server.js"
+    "dev": "node --watch scripts/server.js",
+    "start": "node scripts/server.js",
+    "check": "node --check app.js && node --check scripts/server.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.89.0",

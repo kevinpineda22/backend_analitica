@@ -194,7 +194,11 @@ function respuestaError(response, error, mensaje) {
   });
 }
 
-app.get(["/", "/api", "/api/salud"], async (_request, response) => {
+app.get("/", (_request, response) => {
+  response.json({ ok: true, servicio: "API de analitica" });
+});
+
+app.get(["/api", "/api/salud"], async (_request, response) => {
   try {
     const result = await pool.query("SELECT NOW() AS ahora");
     response.json({
