@@ -22,10 +22,11 @@ const pool = new Pool({
   ssl: process.env.POSTGRES_SSLMODE === "require"
     ? { rejectUnauthorized: false }
     : false,
-  max: Number(process.env.POSTGRES_POOL_SIZE || 4),
+  max: 1,
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000,
   statement_timeout: Number(process.env.POSTGRES_STATEMENT_TIMEOUT || 55000),
+  options: "-c max_parallel_workers_per_gather=0",
   application_name: "merkahorro_powerbi_api",
 });
 
