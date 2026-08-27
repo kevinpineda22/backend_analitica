@@ -460,6 +460,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
           "003": { nombre: "Carnes", unidad: "KL" },
         };
         const negociosPorCodigo = new Map(negocios.map((row) => [row.codigo, row]));
+        response.set("X-Analytics-Source", "resumen-diario");
         return response.json({
           ok: true,
           data: {
@@ -519,6 +520,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
           "003": { nombre: "Carnes", unidad: "KL" },
         };
         const negociosPorCodigo = new Map(negocios.map((row) => [row.codigo, row]));
+        response.set("X-Analytics-Source", "resumen-diario");
         return response.json({
           ok: true,
           data: {
@@ -562,6 +564,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
     }
 
     if (rapido) {
+      response.set("X-Analytics-Source", "transaccional");
       const result = await pool.query(`${cteFiltrado},
         totales AS (
           SELECT COALESCE(SUM(v.vr_neto_det), 0) AS "totalVentas",
@@ -642,6 +645,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
       });
     }
 
+    response.set("X-Analytics-Source", "transaccional");
     const consultasBase = [
       `${cteFiltrado}
         SELECT COALESCE(SUM(v.vr_neto_det), 0) AS "totalVentas",
