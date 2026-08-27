@@ -70,6 +70,10 @@ app.use(cors({
   },
 }));
 app.use(express.json({ limit: "32kb" }));
+app.use("/api/analitica", (_request, response, next) => {
+  response.set("Cache-Control", "public, max-age=60, s-maxage=300, stale-while-revalidate=1800");
+  next();
+});
 
 function fechaValida(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return false;
@@ -201,7 +205,36 @@ app.get(["/api", "/api/salud"], async (_request, response) => {
 
 app.get("/api/analitica/filtros", async (_request, response) => {
   try {
-    const result = await pool.query(`WITH periodo AS (
+    let result;
+    try {
+      result = await pool.query(`WITH periodo AS (
+        SELECT MIN(fecha)::date AS desde, MAX(fecha)::date AS hasta
+        FROM merkahorro_siesa.ventas_pdv_resumen_diario
+      )
+      SELECT v.bodega::text AS codoc,
+             MAX(v.desc_bodega) AS nombre,
+             p.desde::text AS desde,
+             p.hasta::text AS hasta,
+             (SELECT ARRAY_AGG(DISTINCT BTRIM("001-GRUPO"::text) ORDER BY BTRIM("001-GRUPO"::text))
+                FILTER (WHERE NULLIF(BTRIM("001-GRUPO"::text), '') IS NOT NULL)
+              FROM merkahorro_siesa.dimitems) AS grupos,
+             (SELECT ARRAY_AGG(DISTINCT BTRIM("002-SUBGRUPO"::text) ORDER BY BTRIM("002-SUBGRUPO"::text))
+                FILTER (WHERE NULLIF(BTRIM("002-SUBGRUPO"::text), '') IS NOT NULL)
+              FROM merkahorro_siesa.dimitems) AS subgrupos,
+             (SELECT ARRAY_AGG(DISTINCT BTRIM("003-PROVEEDOR"::text) ORDER BY BTRIM("003-PROVEEDOR"::text))
+                FILTER (WHERE NULLIF(BTRIM("003-PROVEEDOR"::text), '') IS NOT NULL)
+              FROM merkahorro_siesa.dimitems) AS proveedores,
+             (SELECT ARRAY_AGG(DISTINCT BTRIM("004-MARCA"::text) ORDER BY BTRIM("004-MARCA"::text))
+                FILTER (WHERE NULLIF(BTRIM("004-MARCA"::text), '') IS NOT NULL)
+              FROM merkahorro_siesa.dimitems) AS marcas
+      FROM merkahorro_siesa.ventas_pdv_resumen_diario v
+      CROSS JOIN periodo p
+      WHERE v.fecha >= p.hasta - 90
+      GROUP BY v.bodega, p.desde, p.hasta
+      ORDER BY nombre`);
+    } catch (error) {
+      if (!["42P01", "42703"].includes(error.code)) throw error;
+      result = await pool.query(`WITH periodo AS (
       SELECT MIN(fecha_docto)::date AS desde, MAX(fecha_docto)::date AS hasta
       FROM merkahorro_siesa.ventas_pdv_detalle
       WHERE fecha_docto IS NOT NULL
@@ -228,6 +261,7 @@ app.get("/api/analitica/filtros", async (_request, response) => {
       AND NULLIF(BTRIM(v.bodega::text), '') IS NOT NULL
     GROUP BY v.bodega, p.desde, p.hasta
     ORDER BY nombre`);
+    }
 
     if (!result.rows.length || !result.rows[0].desde) {
       return response.status(404).json({ ok: false, error: "No hay ventas disponibles para analizar." });
@@ -304,6 +338,93 @@ async function ejecutarConsultas(consultas, values) {
   return resultados;
 }
 
+async function consultarResumenDiario(desde, hasta, tienda) {
+  const result = await pool.query(`WITH diario AS MATERIALIZED (
+      SELECT *
+      FROM merkahorro_siesa.ventas_pdv_resumen_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+        AND ($3::text IS NULL OR bodega = $3)
+    ), negocios AS (
+      SELECT unidad_negocio AS codigo,
+             SUM(ventas) AS ventas,
+             SUM(unidades) AS cantidad,
+             SUM(tickets)::bigint AS tickets
+      FROM merkahorro_siesa.ventas_pdv_resumen_negocio_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+        AND ($3::text IS NULL OR bodega = $3)
+      GROUP BY unidad_negocio
+    )
+    SELECT JSON_BUILD_OBJECT(
+             'totalVentas', COALESCE(SUM(ventas), 0),
+             'totalUnidades', COALESCE(SUM(unidades), 0),
+             'totalImpuestos', COALESCE(SUM(impuestos), 0),
+             'transacciones', COALESCE(SUM(tickets), 0),
+             'clientesActivos', COALESCE((
+               SELECT COUNT(DISTINCT cliente)
+               FROM diario fila
+               CROSS JOIN LATERAL UNNEST(fila.clientes) cliente
+             ), 0),
+             'valorActual', COALESCE(SUM(ventas), 0)
+           ) AS total,
+           COALESCE((
+             SELECT JSON_AGG(fila ORDER BY fecha)
+             FROM (
+               SELECT fecha::text AS fecha, SUM(ventas) AS valor
+               FROM diario GROUP BY fecha
+             ) fila
+           ), '[]'::json) AS serie,
+           COALESCE((
+             SELECT JSON_AGG(fila ORDER BY valor DESC)
+             FROM (
+               SELECT bodega AS codoc, MAX(desc_bodega) AS nombre, SUM(ventas) AS valor
+               FROM diario GROUP BY bodega
+             ) fila
+           ), '[]'::json) AS sedes,
+           COALESCE((SELECT JSON_AGG(negocios ORDER BY codigo) FROM negocios), '[]'::json) AS negocios
+    FROM diario`, [desde, hasta, tienda || null]);
+  return result.rows[0];
+}
+
+async function consultarDetallesDiarios(desde, hasta, tienda) {
+  const result = await pool.query(`WITH items AS MATERIALIZED (
+      SELECT *
+      FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+        AND ($3::text IS NULL OR bodega = $3)
+    )
+    SELECT COALESCE((
+             SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT grupo AS nombre, SUM(ventas) AS valor
+               FROM items GROUP BY grupo ORDER BY valor DESC LIMIT 15
+             ) fila
+           ), '[]'::json) AS grupos,
+           COALESCE((
+             SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT subgrupo AS nombre, SUM(ventas) AS valor
+               FROM items GROUP BY subgrupo ORDER BY valor DESC LIMIT 15
+             ) fila
+           ), '[]'::json) AS subgrupos,
+           COALESCE((
+             SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT proveedor AS nombre, SUM(ventas) AS valor
+               FROM items GROUP BY proveedor ORDER BY valor DESC LIMIT 15
+             ) fila
+           ), '[]'::json) AS proveedores,
+           COALESCE((
+             SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT marca AS nombre, SUM(ventas) AS valor
+               FROM items GROUP BY marca ORDER BY valor DESC LIMIT 15
+             ) fila
+           ), '[]'::json) AS marcas,
+           COALESCE((
+             SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT item AS referencia, MAX(desc_item) AS nombre, SUM(ventas) AS valor
+               FROM items GROUP BY item ORDER BY valor DESC LIMIT 15
+             ) fila
+           ), '[]'::json) AS productos`, [desde, hasta, tienda || null]);
+  return result.rows[0];
+}
+
 app.get("/api/analitica/resumen", async (request, response) => {
   const periodo = validarPeriodo(request, response);
   if (!periodo) return;
@@ -323,6 +444,123 @@ app.get("/api/analitica/resumen", async (request, response) => {
   const rapido = request.query.rapido === "1";
 
   try {
+    const puedeUsarResumenDiario = rapido
+      && metrica === "pesos"
+      && !values.slice(3).some(Boolean);
+    if (puedeUsarResumenDiario) {
+      try {
+        const { total, serie, sedes, negocios } = await consultarResumenDiario(
+          periodo.desde,
+          periodo.hasta,
+          values[2],
+        );
+        const definiciones = {
+          "001": { nombre: "Abarrotes", unidad: "UND" },
+          "002": { nombre: "Fruver", unidad: "KL" },
+          "003": { nombre: "Carnes", unidad: "KL" },
+        };
+        const negociosPorCodigo = new Map(negocios.map((row) => [row.codigo, row]));
+        return response.json({
+          ok: true,
+          data: {
+            periodo,
+            metrica,
+            serie: normalizarValores(serie),
+            sedes: normalizarValores(sedes),
+            grupos: [],
+            subgrupos: [],
+            proveedores: [],
+            marcas: [],
+            productos: [],
+            valorActual: numero(total.valorActual),
+            valorAnterior: 0,
+            variacion: null,
+            totalVentas: numero(total.totalVentas),
+            totalUnidades: numero(total.totalUnidades),
+            totalImpuestos: numero(total.totalImpuestos),
+            transacciones: numero(total.transacciones),
+            clientesActivos: numero(total.clientesActivos),
+            unidadesNegocio: Object.entries(definiciones).map(([codigo, definicion]) => {
+              const row = negociosPorCodigo.get(codigo) || {};
+              const cantidad = numero(row.cantidad);
+              const tickets = numero(row.tickets);
+              return {
+                codigo,
+                ...definicion,
+                ventas: numero(row.ventas),
+                cantidad,
+                tickets,
+                promedio: tickets ? cantidad / tickets : 0,
+              };
+            }),
+            parcial: true,
+          },
+        });
+      } catch (error) {
+        if (!["42P01", "42703"].includes(error.code)) throw error;
+        console.warn("Resumen diario no instalado; se usa la tabla transaccional.");
+      }
+    }
+
+    const puedeUsarDetallesDiarios = !rapido
+      && metrica === "pesos"
+      && !values.slice(3).some(Boolean);
+    if (puedeUsarDetallesDiarios) {
+      try {
+        const { total, serie, sedes, negocios } = await consultarResumenDiario(
+          periodo.desde,
+          periodo.hasta,
+          values[2],
+        );
+        const detalles = await consultarDetallesDiarios(periodo.desde, periodo.hasta, values[2]);
+        const definiciones = {
+          "001": { nombre: "Abarrotes", unidad: "UND" },
+          "002": { nombre: "Fruver", unidad: "KL" },
+          "003": { nombre: "Carnes", unidad: "KL" },
+        };
+        const negociosPorCodigo = new Map(negocios.map((row) => [row.codigo, row]));
+        return response.json({
+          ok: true,
+          data: {
+            periodo,
+            metrica,
+            serie: normalizarValores(serie),
+            sedes: normalizarValores(sedes),
+            grupos: normalizarValores(detalles.grupos),
+            subgrupos: normalizarValores(detalles.subgrupos),
+            proveedores: normalizarValores(detalles.proveedores),
+            marcas: normalizarValores(detalles.marcas),
+            productos: normalizarValores(detalles.productos),
+            valorActual: numero(total.valorActual),
+            valorAnterior: 0,
+            variacion: null,
+            totalVentas: numero(total.totalVentas),
+            totalUnidades: numero(total.totalUnidades),
+            totalImpuestos: numero(total.totalImpuestos),
+            transacciones: numero(total.transacciones),
+            clientesActivos: numero(total.clientesActivos),
+            unidadesNegocio: Object.entries(definiciones).map(([codigo, definicion]) => {
+              const row = negociosPorCodigo.get(codigo) || {};
+              const cantidad = numero(row.cantidad);
+              const tickets = numero(row.tickets);
+              return {
+                codigo,
+                ...definicion,
+                ventas: numero(row.ventas),
+                cantidad,
+                tickets,
+                promedio: tickets ? cantidad / tickets : 0,
+              };
+            }),
+            parcial: false,
+          },
+        });
+      } catch (error) {
+        if (!["42P01", "42703"].includes(error.code)) throw error;
+        console.warn("Detalle diario no instalado; se usa la tabla transaccional.");
+      }
+    }
+
     if (rapido) {
       const result = await pool.query(`${cteFiltrado},
         totales AS (
