@@ -33,7 +33,13 @@ pool.on("error", (error) => {
   console.error("Conexion inactiva de PostgreSQL terminada:", error.message);
 });
 
-const allowedOrigins = (process.env.POWER_BI_ALLOWED_ORIGINS || "http://127.0.0.1:5173,http://localhost:5173")
+const defaultAllowedOrigins = [
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+  "https://merkahorro.com",
+  "https://www.merkahorro.com",
+];
+const allowedOrigins = (process.env.POWER_BI_ALLOWED_ORIGINS || defaultAllowedOrigins.join(","))
   .split(",")
   .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
