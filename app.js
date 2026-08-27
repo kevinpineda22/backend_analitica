@@ -296,6 +296,14 @@ function normalizarValores(rows) {
   return rows.map((row) => ({ ...row, valor: numero(row.valor) }));
 }
 
+async function ejecutarConsultas(consultas, values) {
+  const resultados = [];
+  for (const consulta of consultas) {
+    resultados.push(await pool.query(consulta, values));
+  }
+  return resultados;
+}
+
 app.get("/api/analitica/resumen", async (request, response) => {
   const periodo = validarPeriodo(request, response);
   if (!periodo) return;
@@ -315,51 +323,132 @@ app.get("/api/analitica/resumen", async (request, response) => {
   const rapido = request.query.rapido === "1";
 
   try {
+    if (rapido) {
+      const result = await pool.query(`${cteFiltrado},
+        totales AS (
+          SELECT COALESCE(SUM(v.vr_neto_det), 0) AS "totalVentas",
+                 COALESCE(SUM(v.cantidad), 0) AS "totalUnidades",
+                 COALESCE(SUM(v.vr_impto_det), 0) AS "totalImpuestos",
+                 COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS transacciones,
+                 COUNT(DISTINCT NULLIF(BTRIM(v.nit_tercero), ''))::bigint AS "clientesActivos",
+                 ${metricaSql} AS "valorActual"
+          FROM ventas v
+        ),
+        serie_resumen AS (
+          SELECT v.fecha_docto::date::text AS fecha, ${metricaSql} AS valor
+          FROM ventas v GROUP BY 1
+        ),
+        sedes_resumen AS (
+          SELECT v.bodega::text AS codoc,
+                 COALESCE(NULLIF(BTRIM(MAX(v.desc_bodega)), ''), v.bodega::text) AS nombre,
+                 ${metricaSql} AS valor
+          FROM ventas v GROUP BY v.bodega
+        ),
+        negocios_resumen AS (
+          SELECT BTRIM(v.unidad_de_negocio) AS codigo,
+                 COALESCE(SUM(v.vr_neto_det), 0) AS ventas,
+                 COALESCE(SUM(v.cantidad), 0) AS cantidad,
+                 COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS tickets
+          FROM ventas v
+          WHERE BTRIM(v.unidad_de_negocio) IN ('001', '002', '003')
+          GROUP BY 1
+        )
+        SELECT ROW_TO_JSON(totales) AS total,
+               COALESCE((SELECT JSON_AGG(serie_resumen ORDER BY fecha) FROM serie_resumen), '[]'::json) AS serie,
+               COALESCE((SELECT JSON_AGG(sedes_resumen ORDER BY valor DESC) FROM sedes_resumen), '[]'::json) AS sedes,
+               COALESCE((SELECT JSON_AGG(negocios_resumen ORDER BY codigo) FROM negocios_resumen), '[]'::json) AS negocios
+        FROM totales`, values);
+      const { total, serie, sedes, negocios } = result.rows[0];
+      const definiciones = {
+        "001": { nombre: "Abarrotes", unidad: "UND" },
+        "002": { nombre: "Fruver", unidad: "KL" },
+        "003": { nombre: "Carnes", unidad: "KL" },
+      };
+      const negociosPorCodigo = new Map(negocios.map((row) => [row.codigo, row]));
+
+      return response.json({
+        ok: true,
+        data: {
+          periodo,
+          metrica,
+          serie: normalizarValores(serie),
+          sedes: normalizarValores(sedes),
+          grupos: [],
+          subgrupos: [],
+          proveedores: [],
+          marcas: [],
+          productos: [],
+          valorActual: numero(total.valorActual),
+          valorAnterior: 0,
+          variacion: null,
+          totalVentas: numero(total.totalVentas),
+          totalUnidades: numero(total.totalUnidades),
+          totalImpuestos: numero(total.totalImpuestos),
+          transacciones: numero(total.transacciones),
+          clientesActivos: numero(total.clientesActivos),
+          unidadesNegocio: Object.entries(definiciones).map(([codigo, definicion]) => {
+            const row = negociosPorCodigo.get(codigo) || {};
+            const cantidad = numero(row.cantidad);
+            const tickets = numero(row.tickets);
+            return {
+              codigo,
+              ...definicion,
+              ventas: numero(row.ventas),
+              cantidad,
+              tickets,
+              promedio: tickets ? cantidad / tickets : 0,
+            };
+          }),
+          parcial: true,
+        },
+      });
+    }
+
     const consultasBase = [
-      pool.query(`${cteFiltrado}
+      `${cteFiltrado}
         SELECT COALESCE(SUM(v.vr_neto_det), 0) AS "totalVentas",
                COALESCE(SUM(v.cantidad), 0) AS "totalUnidades",
                COALESCE(SUM(v.vr_impto_det), 0) AS "totalImpuestos",
                COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS transacciones,
                COUNT(DISTINCT NULLIF(BTRIM(v.nit_tercero), ''))::bigint AS "clientesActivos",
                ${metricaSql} AS "valorActual"
-        FROM ventas v`, values),
-      pool.query(`${cteFiltrado}
+        FROM ventas v`,
+      `${cteFiltrado}
         SELECT v.fecha_docto::date::text AS fecha, ${metricaSql} AS valor
-        FROM ventas v GROUP BY 1 ORDER BY 1`, values),
-      pool.query(`${cteFiltrado}
+        FROM ventas v GROUP BY 1 ORDER BY 1`,
+      `${cteFiltrado}
         SELECT v.bodega::text AS codoc,
                COALESCE(NULLIF(BTRIM(MAX(v.desc_bodega)), ''), v.bodega::text) AS nombre,
                ${metricaSql} AS valor
-        FROM ventas v GROUP BY v.bodega ORDER BY valor DESC`, values),
-      pool.query(`${cteFiltrado}
+        FROM ventas v GROUP BY v.bodega ORDER BY valor DESC`,
+      `${cteFiltrado}
         SELECT BTRIM(v.unidad_de_negocio) AS codigo,
                COALESCE(SUM(v.vr_neto_det), 0) AS ventas,
                COALESCE(SUM(v.cantidad), 0) AS cantidad,
                COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS tickets
         FROM ventas v
         WHERE BTRIM(v.unidad_de_negocio) IN ('001', '002', '003')
-        GROUP BY 1 ORDER BY 1`, values),
+        GROUP BY 1 ORDER BY 1`,
     ];
 
-    const consultasDetalle = rapido ? [] : [
-      pool.query(queryDimension("v.grupo", metricaSql), values),
-      pool.query(queryDimension("v.subgrupo", metricaSql), values),
-      pool.query(queryDimension("v.proveedor", metricaSql), values),
-      pool.query(queryDimension("v.marca", metricaSql), values),
-      pool.query(`${cteFiltrado}
+    const consultasDetalle = [
+      queryDimension("v.grupo", metricaSql),
+      queryDimension("v.subgrupo", metricaSql),
+      queryDimension("v.proveedor", metricaSql),
+      queryDimension("v.marca", metricaSql),
+      `${cteFiltrado}
         SELECT v.id_item::text AS referencia,
                COALESCE(NULLIF(BTRIM(MAX(v.desc_item)), ''), v.id_item::text) AS nombre,
                ${metricaSql} AS valor
         FROM ventas v
         WHERE v.id_item IS NOT NULL
-        GROUP BY v.id_item ORDER BY valor DESC LIMIT 15`, values),
+        GROUP BY v.id_item ORDER BY valor DESC LIMIT 15`,
     ];
 
-    const [totalResult, serieResult, sedesResult, negociosResult, ...detalles] = await Promise.all([
+    const [totalResult, serieResult, sedesResult, negociosResult, ...detalles] = await ejecutarConsultas([
       ...consultasBase,
       ...consultasDetalle,
-    ]);
+    ], values);
     const total = totalResult.rows[0];
     const definiciones = {
       "001": { nombre: "Abarrotes", unidad: "UND" },
