@@ -3,9 +3,15 @@ import process from "node:process";
 import cors from "cors";
 import express from "express";
 import pg from "pg";
-import { createClient } from "@supabase/supabase-js";
 
 const { Pool } = pg;
+
+const postgresConfigurado = [
+  "POSTGRES_HOST",
+  "POSTGRES_DATABASE",
+  "POSTGRES_USER",
+  "POSTGRES_PASSWORD",
+].every((variable) => Boolean(process.env[variable]));
 
 const pool = new Pool({
   host: process.env.POSTGRES_HOST,
@@ -26,14 +32,6 @@ const pool = new Pool({
 pool.on("error", (error) => {
   console.error("Conexion inactiva de PostgreSQL terminada:", error.message);
 });
-
-const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
-const supabase = supabaseUrl && supabaseKey
-  ? createClient(supabaseUrl, supabaseKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
-  : null;
 
 const allowedOrigins = (process.env.POWER_BI_ALLOWED_ORIGINS || "http://127.0.0.1:5173,http://localhost:5173")
   .split(",")
@@ -65,32 +63,6 @@ app.use(cors({
   },
 }));
 app.use(express.json({ limit: "32kb" }));
-
-async function autenticar(request, response, next) {
-  if (!supabase) {
-    return response.status(503).json({
-      ok: false,
-      error: "La validacion de sesiones no esta configurada.",
-    });
-  }
-
-  const authorization = request.get("authorization") || "";
-  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
-  if (!token) {
-    return response.status(401).json({ ok: false, error: "Sesion requerida." });
-  }
-
-  try {
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data.user) {
-      return response.status(401).json({ ok: false, error: "Sesion invalida o expirada." });
-    }
-    request.user = data.user;
-    return next();
-  } catch {
-    return response.status(503).json({ ok: false, error: "No fue posible validar la sesion." });
-  }
-}
 
 function fechaValida(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return false;
@@ -195,7 +167,14 @@ function respuestaError(response, error, mensaje) {
 }
 
 app.get("/", (_request, response) => {
-  response.json({ ok: true, servicio: "API de analitica" });
+  response.json({
+    ok: true,
+    servicio: "API de analitica",
+    configuracion: {
+      postgres: postgresConfigurado,
+      cors: allowedOrigins.length > 0,
+    },
+  });
 });
 
 app.get(["/api", "/api/salud"], async (_request, response) => {
@@ -206,7 +185,6 @@ app.get(["/api", "/api/salud"], async (_request, response) => {
       data: {
         servicio: "API de analitica",
         ahora: result.rows[0].ahora,
-        autenticacionConfigurada: Boolean(supabase),
       },
     });
   } catch (error) {
@@ -214,7 +192,7 @@ app.get(["/api", "/api/salud"], async (_request, response) => {
   }
 });
 
-app.get("/api/analitica/filtros", autenticar, async (_request, response) => {
+app.get("/api/analitica/filtros", async (_request, response) => {
   try {
     const result = await pool.query(`WITH periodo AS (
       SELECT MIN(fecha_docto)::date AS desde, MAX(fecha_docto)::date AS hasta
@@ -265,7 +243,7 @@ app.get("/api/analitica/filtros", autenticar, async (_request, response) => {
   }
 });
 
-app.get("/api/analitica/bodegas", autenticar, async (request, response) => {
+app.get("/api/analitica/bodegas", async (request, response) => {
   const periodo = validarPeriodo(request, response);
   if (!periodo) return;
 
@@ -311,7 +289,7 @@ function normalizarValores(rows) {
   return rows.map((row) => ({ ...row, valor: numero(row.valor) }));
 }
 
-app.get("/api/analitica/resumen", autenticar, async (request, response) => {
+app.get("/api/analitica/resumen", async (request, response) => {
   const periodo = validarPeriodo(request, response);
   if (!periodo) return;
 
@@ -426,7 +404,7 @@ app.get("/api/analitica/resumen", autenticar, async (request, response) => {
   }
 });
 
-app.get("/api/analitica/modelo", autenticar, (_request, response) => {
+app.get("/api/analitica/modelo", (_request, response) => {
   response.json({
     ok: true,
     data: {
