@@ -1,0 +1,34 @@
+# Backend de analitica
+
+API Express para consultar indicadores comerciales desde PostgreSQL. Se ejecuta localmente con Node.js y en produccion como una funcion serverless de Vercel.
+
+## Rutas
+
+- `GET /api/salud`
+- `GET /api/analitica/filtros`
+- `GET /api/analitica/bodegas`
+- `GET /api/analitica/resumen`
+- `GET /api/analitica/modelo`
+
+Las rutas de analitica requieren `Authorization: Bearer <token>` de una sesion valida de Supabase.
+
+## Desarrollo local
+
+1. Instala Node.js 20 o superior.
+2. Ejecuta `npm install`.
+3. Conserva las credenciales locales en `.env` usando `.env.example` como referencia.
+4. Agrega `http://localhost:5173` a `POWER_BI_ALLOWED_ORIGINS`.
+5. Ejecuta `npm run dev`.
+
+La API quedara disponible en `http://127.0.0.1:3010/api`.
+
+## Despliegue en Vercel
+
+1. Importa esta carpeta como un proyecto nuevo en Vercel.
+2. Deja **Framework Preset** en `Other` y la carpeta raiz apuntando a este proyecto.
+3. Registra en **Settings > Environment Variables** todas las variables de `.env.example` excepto `POWER_BI_API_PORT` y `POWER_BI_API_HOST`.
+4. En `POWER_BI_ALLOWED_ORIGINS` registra la URL publica del frontend, sin `/` final. Se aceptan varias URLs separadas por comas.
+5. Despliega y comprueba `https://TU-BACKEND.vercel.app/api/salud`.
+6. En el frontend configura `VITE_POWER_BI_API_URL=https://TU-BACKEND.vercel.app/api` y vuelve a desplegarlo.
+
+No subas `.env` al repositorio. Si PostgreSQL solo admite ciertas IP, debe aceptar conexiones desde Vercel o utilizar un pooler accesible publicamente. Para produccion se recomienda `POSTGRES_SSLMODE=require` cuando el proveedor lo soporte.
