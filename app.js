@@ -90,13 +90,18 @@ function esTimeout(error) {
     || /timeout|statement timeout/i.test(error?.message || "");
 }
 
+const ventaSubtotal = "COALESCE(SUM(COALESCE(v.valor_bruto, 0) - COALESCE(v.vlr_tot_dscto, 0)), 0)";
+const contribucion = `COALESCE(SUM(
+  COALESCE(v.valor_bruto, 0) - COALESCE(v.vlr_tot_dscto, 0) - COALESCE(v.costo, 0)
+), 0)`;
+
 const metricas = {
-  pesos: "COALESCE(SUM(v.vr_neto_det), 0)",
+  pesos: ventaSubtotal,
   unidades: "COALESCE(SUM(v.cantidad), 0)",
   clientes: "COUNT(DISTINCT NULLIF(BTRIM(v.nit_tercero), ''))::bigint",
   tickets: "COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint",
   ticket_promedio: `COALESCE(
-    SUM(v.vr_neto_det) /
+    SUM(COALESCE(v.valor_bruto, 0) - COALESCE(v.vlr_tot_dscto, 0)) /
     NULLIF(COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto)), 0),
     0
   )`,
@@ -317,25 +322,12 @@ function normalizarNumerosBodega(row) {
   };
 }
 
-function queryDimension(campo, metricaSql) {
-  return `${cteFiltrado}
-    SELECT COALESCE(${campo}, 'Sin ${campo}') AS nombre, ${metricaSql} AS valor
-    FROM ventas v
-    GROUP BY 1
-    ORDER BY valor DESC
-    LIMIT 15`;
-}
-
 function normalizarValores(rows) {
-  return rows.map((row) => ({ ...row, valor: numero(row.valor) }));
-}
-
-async function ejecutarConsultas(consultas, values) {
-  const resultados = [];
-  for (const consulta of consultas) {
-    resultados.push(await pool.query(consulta, values));
-  }
-  return resultados;
+  return rows.map((row) => ({
+    ...row,
+    valor: numero(row.valor),
+    ...(row.contribucion == null ? {} : { contribucion: numero(row.contribucion) }),
+  }));
 }
 
 async function consultarResumenDiario(desde, hasta, tienda) {
@@ -356,6 +348,7 @@ async function consultarResumenDiario(desde, hasta, tienda) {
     )
     SELECT JSON_BUILD_OBJECT(
              'totalVentas', COALESCE(SUM(ventas), 0),
+             'totalContribucion', COALESCE(SUM(contribucion), 0),
              'totalUnidades', COALESCE(SUM(unidades), 0),
              'totalImpuestos', COALESCE(SUM(impuestos), 0),
              'transacciones', COALESCE(SUM(tickets), 0),
@@ -369,7 +362,9 @@ async function consultarResumenDiario(desde, hasta, tienda) {
            COALESCE((
              SELECT JSON_AGG(fila ORDER BY fecha)
              FROM (
-               SELECT fecha::text AS fecha, SUM(ventas) AS valor
+               SELECT fecha::text AS fecha,
+                      SUM(ventas) AS valor,
+                      SUM(contribucion) AS contribucion
                FROM diario GROUP BY fecha
              ) fila
            ), '[]'::json) AS serie,
@@ -425,6 +420,77 @@ async function consultarDetallesDiarios(desde, hasta, tienda) {
   return result.rows[0];
 }
 
+async function consultarAnalisisKpiDiario(desde, hasta, tienda, metrica) {
+  if (metrica === "clientes") {
+    const result = await pool.query(`WITH diario AS MATERIALIZED (
+        SELECT *
+        FROM merkahorro_siesa.ventas_pdv_resumen_diario
+        WHERE fecha >= $1::date AND fecha < $2::date + 1
+          AND ($3::text IS NULL OR bodega = $3)
+      ), clientes AS MATERIALIZED (
+        SELECT d.fecha, d.bodega, d.desc_bodega, cliente
+        FROM diario d
+        CROSS JOIN LATERAL UNNEST(d.clientes) cliente
+      )
+      SELECT (SELECT COUNT(DISTINCT cliente)::bigint FROM clientes) AS "valorActual",
+             COALESCE((SELECT JSON_AGG(fila ORDER BY fecha) FROM (
+               SELECT fecha::text AS fecha, COUNT(DISTINCT cliente)::bigint AS valor
+               FROM clientes GROUP BY fecha
+             ) fila), '[]'::json) AS serie,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT bodega AS codoc, MAX(desc_bodega) AS nombre,
+                      COUNT(DISTINCT cliente)::bigint AS valor
+               FROM clientes GROUP BY bodega
+             ) fila), '[]'::json) AS sedes`, [desde, hasta, tienda || null]);
+    return { ...result.rows[0], grupos: [], productos: [] };
+  }
+
+  const agregados = {
+    unidades: { numerador: "unidades", denominador: null },
+    tickets: { numerador: "tickets", denominador: null },
+    ticket_promedio: { numerador: "ventas", denominador: "tickets" },
+  }[metrica];
+  if (!agregados) return null;
+
+  const valor = agregados.denominador
+    ? `COALESCE(SUM(${agregados.numerador}) / NULLIF(SUM(${agregados.denominador}), 0), 0)`
+    : `COALESCE(SUM(${agregados.numerador}), 0)`;
+  const detallesUnidades = metrica === "unidades" ? `,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT grupo AS nombre, SUM(unidades) AS valor
+               FROM items GROUP BY grupo ORDER BY valor DESC LIMIT 15
+             ) fila), '[]'::json) AS grupos,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT item AS referencia, MAX(desc_item) AS nombre, SUM(unidades) AS valor
+               FROM items GROUP BY item ORDER BY valor DESC LIMIT 15
+             ) fila), '[]'::json) AS productos`
+    : ", '[]'::json AS grupos, '[]'::json AS productos";
+  const itemsCte = metrica === "unidades" ? `, items AS MATERIALIZED (
+      SELECT *
+      FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+        AND ($3::text IS NULL OR bodega = $3)
+    )` : "";
+
+  const result = await pool.query(`WITH diario AS MATERIALIZED (
+      SELECT *
+      FROM merkahorro_siesa.ventas_pdv_resumen_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+        AND ($3::text IS NULL OR bodega = $3)
+    )${itemsCte}
+    SELECT (SELECT ${valor} FROM diario) AS "valorActual",
+           COALESCE((SELECT JSON_AGG(fila ORDER BY fecha) FROM (
+             SELECT fecha::text AS fecha, ${valor} AS valor
+             FROM diario GROUP BY fecha
+           ) fila), '[]'::json) AS serie,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+             SELECT bodega AS codoc, MAX(desc_bodega) AS nombre, ${valor} AS valor
+             FROM diario GROUP BY bodega
+           ) fila), '[]'::json) AS sedes
+           ${detallesUnidades}`, [desde, hasta, tienda || null]);
+  return result.rows[0];
+}
+
 app.get("/api/analitica/resumen", async (request, response) => {
   const periodo = validarPeriodo(request, response);
   if (!periodo) return;
@@ -477,6 +543,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
             valorAnterior: 0,
             variacion: null,
             totalVentas: numero(total.totalVentas),
+            totalContribucion: numero(total.totalContribucion),
             totalUnidades: numero(total.totalUnidades),
             totalImpuestos: numero(total.totalImpuestos),
             transacciones: numero(total.transacciones),
@@ -537,6 +604,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
             valorAnterior: 0,
             variacion: null,
             totalVentas: numero(total.totalVentas),
+            totalContribucion: numero(total.totalContribucion),
             totalUnidades: numero(total.totalUnidades),
             totalImpuestos: numero(total.totalImpuestos),
             transacciones: numero(total.transacciones),
@@ -563,11 +631,50 @@ app.get("/api/analitica/resumen", async (request, response) => {
       }
     }
 
+    const puedeUsarAnalisisKpiDiario = !rapido
+      && metrica !== "pesos"
+      && !values.slice(3).some(Boolean);
+    if (puedeUsarAnalisisKpiDiario) {
+      try {
+        const analisis = await consultarAnalisisKpiDiario(
+          periodo.desde,
+          periodo.hasta,
+          values[2],
+          metrica,
+        );
+        if (analisis) {
+          response.set("X-Analytics-Source", "resumen-diario-kpi");
+          return response.json({
+            ok: true,
+            data: {
+              periodo,
+              metrica,
+              serie: normalizarValores(analisis.serie),
+              sedes: normalizarValores(analisis.sedes),
+              grupos: normalizarValores(analisis.grupos),
+              subgrupos: [],
+              proveedores: [],
+              marcas: [],
+              productos: normalizarValores(analisis.productos),
+              valorActual: numero(analisis.valorActual),
+              valorAnterior: 0,
+              variacion: null,
+              parcial: false,
+            },
+          });
+        }
+      } catch (error) {
+        if (!["42P01", "42703"].includes(error.code)) throw error;
+        console.warn("Resumen KPI no disponible; se usa la tabla transaccional.");
+      }
+    }
+
     if (rapido) {
       response.set("X-Analytics-Source", "transaccional");
       const result = await pool.query(`${cteFiltrado},
         totales AS (
-          SELECT COALESCE(SUM(v.vr_neto_det), 0) AS "totalVentas",
+           SELECT ${ventaSubtotal} AS "totalVentas",
+             ${contribucion} AS "totalContribucion",
                  COALESCE(SUM(v.cantidad), 0) AS "totalUnidades",
                  COALESCE(SUM(v.vr_impto_det), 0) AS "totalImpuestos",
                  COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS transacciones,
@@ -576,7 +683,9 @@ app.get("/api/analitica/resumen", async (request, response) => {
           FROM ventas v
         ),
         serie_resumen AS (
-          SELECT v.fecha_docto::date::text AS fecha, ${metricaSql} AS valor
+          SELECT v.fecha_docto::date::text AS fecha,
+                 ${metricaSql} AS valor,
+                 ${contribucion} AS contribucion
           FROM ventas v GROUP BY 1
         ),
         sedes_resumen AS (
@@ -587,7 +696,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
         ),
         negocios_resumen AS (
           SELECT BTRIM(v.unidad_de_negocio) AS codigo,
-                 COALESCE(SUM(v.vr_neto_det), 0) AS ventas,
+                 ${ventaSubtotal} AS ventas,
                  COALESCE(SUM(v.cantidad), 0) AS cantidad,
                  COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS tickets
           FROM ventas v
@@ -623,6 +732,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
           valorAnterior: 0,
           variacion: null,
           totalVentas: numero(total.totalVentas),
+          totalContribucion: numero(total.totalContribucion),
           totalUnidades: numero(total.totalUnidades),
           totalImpuestos: numero(total.totalImpuestos),
           transacciones: numero(total.transacciones),
@@ -646,76 +756,92 @@ app.get("/api/analitica/resumen", async (request, response) => {
     }
 
     response.set("X-Analytics-Source", "transaccional");
-    const consultasBase = [
-      `${cteFiltrado}
-        SELECT COALESCE(SUM(v.vr_neto_det), 0) AS "totalVentas",
-               COALESCE(SUM(v.cantidad), 0) AS "totalUnidades",
-               COALESCE(SUM(v.vr_impto_det), 0) AS "totalImpuestos",
-               COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS transacciones,
-               COUNT(DISTINCT NULLIF(BTRIM(v.nit_tercero), ''))::bigint AS "clientesActivos",
-               ${metricaSql} AS "valorActual"
-        FROM ventas v`,
-      `${cteFiltrado}
-        SELECT v.fecha_docto::date::text AS fecha, ${metricaSql} AS valor
-        FROM ventas v GROUP BY 1 ORDER BY 1`,
-      `${cteFiltrado}
-        SELECT v.bodega::text AS codoc,
-               COALESCE(NULLIF(BTRIM(MAX(v.desc_bodega)), ''), v.bodega::text) AS nombre,
-               ${metricaSql} AS valor
-        FROM ventas v GROUP BY v.bodega ORDER BY valor DESC`,
-      `${cteFiltrado}
-        SELECT BTRIM(v.unidad_de_negocio) AS codigo,
-               COALESCE(SUM(v.vr_neto_det), 0) AS ventas,
-               COALESCE(SUM(v.cantidad), 0) AS cantidad,
-               COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS tickets
-        FROM ventas v
-        WHERE BTRIM(v.unidad_de_negocio) IN ('001', '002', '003')
-        GROUP BY 1 ORDER BY 1`,
-    ];
-
-    const consultasDetalle = [
-      queryDimension("v.grupo", metricaSql),
-      queryDimension("v.subgrupo", metricaSql),
-      queryDimension("v.proveedor", metricaSql),
-      queryDimension("v.marca", metricaSql),
-      `${cteFiltrado}
-        SELECT v.id_item::text AS referencia,
-               COALESCE(NULLIF(BTRIM(MAX(v.desc_item)), ''), v.id_item::text) AS nombre,
-               ${metricaSql} AS valor
-        FROM ventas v
-        WHERE v.id_item IS NOT NULL
-        GROUP BY v.id_item ORDER BY valor DESC LIMIT 15`,
-    ];
-
-    const [totalResult, serieResult, sedesResult, negociosResult, ...detalles] = await ejecutarConsultas([
-      ...consultasBase,
-      ...consultasDetalle,
-    ], values);
-    const total = totalResult.rows[0];
+    const consultaAnalisis = `${cteFiltrado.replace(", ventas AS (", ", ventas AS MATERIALIZED (")}
+      SELECT (
+               SELECT JSON_BUILD_OBJECT(
+                 'totalVentas', ${ventaSubtotal},
+                 'totalContribucion', ${contribucion},
+                 'totalUnidades', COALESCE(SUM(v.cantidad), 0),
+                 'totalImpuestos', COALESCE(SUM(v.vr_impto_det), 0),
+                 'transacciones', COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint,
+                 'clientesActivos', COUNT(DISTINCT NULLIF(BTRIM(v.nit_tercero), ''))::bigint,
+                 'valorActual', ${metricaSql}
+               ) FROM ventas v
+             ) AS total,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY fecha) FROM (
+               SELECT v.fecha_docto::date::text AS fecha,
+                      ${metricaSql} AS valor,
+                      ${contribucion} AS contribucion
+               FROM ventas v GROUP BY 1
+             ) fila), '[]'::json) AS serie,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT v.bodega::text AS codoc,
+                      COALESCE(NULLIF(BTRIM(MAX(v.desc_bodega)), ''), v.bodega::text) AS nombre,
+                      ${metricaSql} AS valor
+               FROM ventas v GROUP BY v.bodega
+             ) fila), '[]'::json) AS sedes,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY codigo) FROM (
+               SELECT BTRIM(v.unidad_de_negocio) AS codigo,
+                      ${ventaSubtotal} AS ventas,
+                      COALESCE(SUM(v.cantidad), 0) AS cantidad,
+                      COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint AS tickets
+               FROM ventas v
+               WHERE BTRIM(v.unidad_de_negocio) IN ('001', '002', '003')
+               GROUP BY 1
+             ) fila), '[]'::json) AS negocios,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT COALESCE(v.grupo, 'Sin grupo') AS nombre, ${metricaSql} AS valor
+               FROM ventas v GROUP BY 1 ORDER BY valor DESC LIMIT 15
+             ) fila), '[]'::json) AS grupos,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT COALESCE(v.subgrupo, 'Sin subgrupo') AS nombre, ${metricaSql} AS valor
+               FROM ventas v GROUP BY 1 ORDER BY valor DESC LIMIT 15
+             ) fila), '[]'::json) AS subgrupos,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT COALESCE(v.proveedor, 'Sin proveedor') AS nombre, ${metricaSql} AS valor
+               FROM ventas v GROUP BY 1 ORDER BY valor DESC LIMIT 15
+             ) fila), '[]'::json) AS proveedores,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT COALESCE(v.marca, 'Sin marca') AS nombre, ${metricaSql} AS valor
+               FROM ventas v GROUP BY 1 ORDER BY valor DESC LIMIT 15
+             ) fila), '[]'::json) AS marcas,
+             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+               SELECT v.id_item::text AS referencia,
+                      COALESCE(NULLIF(BTRIM(MAX(v.desc_item)), ''), v.id_item::text) AS nombre,
+                      ${metricaSql} AS valor
+               FROM ventas v
+               WHERE v.id_item IS NOT NULL
+               GROUP BY v.id_item ORDER BY valor DESC LIMIT 15
+             ) fila), '[]'::json) AS productos`;
+    const resultadoAnalisis = await pool.query(consultaAnalisis, values);
+    const {
+      total, serie, sedes, negocios: filasNegocios,
+      grupos, subgrupos, proveedores, marcas, productos,
+    } = resultadoAnalisis.rows[0];
     const definiciones = {
       "001": { nombre: "Abarrotes", unidad: "UND" },
       "002": { nombre: "Fruver", unidad: "KL" },
       "003": { nombre: "Carnes", unidad: "KL" },
     };
-    const negocios = new Map(negociosResult.rows.map((row) => [row.codigo, row]));
-    const [grupos, subgrupos, proveedores, marcas, productos] = detalles;
+    const negocios = new Map(filasNegocios.map((row) => [row.codigo, row]));
 
     return response.json({
       ok: true,
       data: {
         periodo,
         metrica,
-        serie: normalizarValores(serieResult.rows),
-        sedes: normalizarValores(sedesResult.rows),
-        grupos: normalizarValores(grupos?.rows || []),
-        subgrupos: normalizarValores(subgrupos?.rows || []),
-        proveedores: normalizarValores(proveedores?.rows || []),
-        marcas: normalizarValores(marcas?.rows || []),
-        productos: normalizarValores(productos?.rows || []),
+        serie: normalizarValores(serie),
+        sedes: normalizarValores(sedes),
+        grupos: normalizarValores(grupos),
+        subgrupos: normalizarValores(subgrupos),
+        proveedores: normalizarValores(proveedores),
+        marcas: normalizarValores(marcas),
+        productos: normalizarValores(productos),
         valorActual: numero(total.valorActual),
         valorAnterior: 0,
         variacion: null,
         totalVentas: numero(total.totalVentas),
+        totalContribucion: numero(total.totalContribucion),
         totalUnidades: numero(total.totalUnidades),
         totalImpuestos: numero(total.totalImpuestos),
         transacciones: numero(total.transacciones),
