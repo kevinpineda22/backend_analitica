@@ -97,6 +97,7 @@ const contribucion = `COALESCE(SUM(
 
 const metricas = {
   pesos: ventaSubtotal,
+  contribucion,
   unidades: "COALESCE(SUM(v.cantidad), 0)",
   clientes: "COUNT(DISTINCT NULLIF(BTRIM(v.nit_tercero), ''))::bigint",
   tickets: "COUNT(DISTINCT (v.cia, v.bodega, v.id_tipo_docto, v.consec_docto))::bigint",
@@ -330,7 +331,8 @@ function normalizarValores(rows) {
   }));
 }
 
-async function consultarResumenDiario(desde, hasta, tienda) {
+async function consultarResumenDiario(desde, hasta, tienda, campoValor = "ventas") {
+  const campo = campoValor === "contribucion" ? "contribucion" : "ventas";
   const result = await pool.query(`WITH diario AS MATERIALIZED (
       SELECT *
       FROM merkahorro_siesa.ventas_pdv_resumen_diario
@@ -357,13 +359,13 @@ async function consultarResumenDiario(desde, hasta, tienda) {
                FROM diario fila
                CROSS JOIN LATERAL UNNEST(fila.clientes) cliente
              ), 0),
-             'valorActual', COALESCE(SUM(ventas), 0)
+             'valorActual', COALESCE(SUM(${campo}), 0)
            ) AS total,
            COALESCE((
              SELECT JSON_AGG(fila ORDER BY fecha)
              FROM (
                SELECT fecha::text AS fecha,
-                      SUM(ventas) AS valor,
+                 SUM(${campo}) AS valor,
                       SUM(contribucion) AS contribucion
                FROM diario GROUP BY fecha
              ) fila
@@ -371,7 +373,7 @@ async function consultarResumenDiario(desde, hasta, tienda) {
            COALESCE((
              SELECT JSON_AGG(fila ORDER BY valor DESC)
              FROM (
-               SELECT bodega AS codoc, MAX(desc_bodega) AS nombre, SUM(ventas) AS valor
+               SELECT bodega AS codoc, MAX(desc_bodega) AS nombre, SUM(${campo}) AS valor
                FROM diario GROUP BY bodega
              ) fila
            ), '[]'::json) AS sedes,
@@ -380,7 +382,8 @@ async function consultarResumenDiario(desde, hasta, tienda) {
   return result.rows[0];
 }
 
-async function consultarDetallesDiarios(desde, hasta, tienda) {
+async function consultarDetallesDiarios(desde, hasta, tienda, campoValor = "ventas") {
+  const campo = campoValor === "contribucion" ? "contribucion" : "ventas";
   const result = await pool.query(`WITH items AS MATERIALIZED (
       SELECT *
       FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
@@ -389,31 +392,31 @@ async function consultarDetallesDiarios(desde, hasta, tienda) {
     )
     SELECT COALESCE((
              SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-               SELECT grupo AS nombre, SUM(ventas) AS valor
+               SELECT grupo AS nombre, SUM(${campo}) AS valor
                FROM items GROUP BY grupo ORDER BY valor DESC LIMIT 15
              ) fila
            ), '[]'::json) AS grupos,
            COALESCE((
              SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-               SELECT subgrupo AS nombre, SUM(ventas) AS valor
+               SELECT subgrupo AS nombre, SUM(${campo}) AS valor
                FROM items GROUP BY subgrupo ORDER BY valor DESC LIMIT 15
              ) fila
            ), '[]'::json) AS subgrupos,
            COALESCE((
              SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-               SELECT proveedor AS nombre, SUM(ventas) AS valor
+               SELECT proveedor AS nombre, SUM(${campo}) AS valor
                FROM items GROUP BY proveedor ORDER BY valor DESC LIMIT 15
              ) fila
            ), '[]'::json) AS proveedores,
            COALESCE((
              SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-               SELECT marca AS nombre, SUM(ventas) AS valor
+               SELECT marca AS nombre, SUM(${campo}) AS valor
                FROM items GROUP BY marca ORDER BY valor DESC LIMIT 15
              ) fila
            ), '[]'::json) AS marcas,
            COALESCE((
              SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-               SELECT item AS referencia, MAX(desc_item) AS nombre, SUM(ventas) AS valor
+               SELECT item AS referencia, MAX(desc_item) AS nombre, SUM(${campo}) AS valor
                FROM items GROUP BY item ORDER BY valor DESC LIMIT 15
              ) fila
            ), '[]'::json) AS productos`, [desde, hasta, tienda || null]);
@@ -571,16 +574,23 @@ app.get("/api/analitica/resumen", async (request, response) => {
     }
 
     const puedeUsarDetallesDiarios = !rapido
-      && metrica === "pesos"
+      && ["pesos", "contribucion"].includes(metrica)
       && !values.slice(3).some(Boolean);
     if (puedeUsarDetallesDiarios) {
       try {
+        const campoValor = metrica === "contribucion" ? "contribucion" : "ventas";
         const { total, serie, sedes, negocios } = await consultarResumenDiario(
           periodo.desde,
           periodo.hasta,
           values[2],
+          campoValor,
         );
-        const detalles = await consultarDetallesDiarios(periodo.desde, periodo.hasta, values[2]);
+        const detalles = await consultarDetallesDiarios(
+          periodo.desde,
+          periodo.hasta,
+          values[2],
+          campoValor,
+        );
         const definiciones = {
           "001": { nombre: "Abarrotes", unidad: "UND" },
           "002": { nombre: "Fruver", unidad: "KL" },
