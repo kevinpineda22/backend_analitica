@@ -338,6 +338,11 @@ async function consultarResumenDiario(desde, hasta, tienda, campoValor = "ventas
       FROM merkahorro_siesa.ventas_pdv_resumen_diario
       WHERE fecha >= $1::date AND fecha < $2::date + 1
         AND ($3::text IS NULL OR bodega = $3)
+    ), bodegas AS (
+      SELECT bodega, MAX(desc_bodega) AS nombre
+      FROM merkahorro_siesa.ventas_pdv_resumen_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+      GROUP BY bodega
     ), negocios AS (
       SELECT unidad_negocio AS codigo,
              SUM(ventas) AS ventas,
@@ -420,6 +425,88 @@ async function consultarDetallesDiarios(desde, hasta, tienda, campoValor = "vent
                FROM items GROUP BY item ORDER BY valor DESC LIMIT 15
              ) fila
            ), '[]'::json) AS productos`, [desde, hasta, tienda || null]);
+  return result.rows[0];
+}
+
+async function consultarResumenItemsFiltrado(values, metrica) {
+  const campo = {
+    pesos: "ventas",
+    contribucion: "contribucion",
+    unidades: "unidades",
+  }[metrica];
+  if (!campo) return null;
+
+  const result = await pool.query(`WITH items AS MATERIALIZED (
+      SELECT *
+      FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+        AND ($3::text IS NULL OR bodega = $3)
+        AND ($4::text IS NULL OR unidad_negocio = $4)
+        AND ($5::text IS NULL OR grupo = $5)
+        AND ($6::text IS NULL OR subgrupo = $6)
+        AND ($7::text IS NULL OR proveedor = $7)
+        AND ($8::text IS NULL OR marca = $8)
+    ), negocios AS (
+      SELECT unidad_negocio AS codigo,
+             SUM(ventas) AS ventas,
+             SUM(unidades) AS cantidad
+      FROM items GROUP BY unidad_negocio
+    ), tickets_negocio AS (
+      SELECT unidad_negocio AS codigo, COUNT(DISTINCT documento)::bigint AS tickets
+      FROM items CROSS JOIN LATERAL UNNEST(documentos) documento
+      GROUP BY unidad_negocio
+    )
+    SELECT JSON_BUILD_OBJECT(
+             'totalVentas', COALESCE(SUM(ventas), 0),
+             'totalContribucion', COALESCE(SUM(contribucion), 0),
+             'totalUnidades', COALESCE(SUM(unidades), 0),
+             'totalImpuestos', COALESCE(SUM(impuestos), 0),
+             'transacciones', COALESCE((
+               SELECT COUNT(DISTINCT documento)::bigint
+               FROM items CROSS JOIN LATERAL UNNEST(documentos) documento
+             ), 0),
+             'clientesActivos', COALESCE((
+               SELECT COUNT(DISTINCT cliente)::bigint
+               FROM items CROSS JOIN LATERAL UNNEST(clientes) cliente
+             ), 0),
+             'valorActual', COALESCE(SUM(${campo}), 0)
+           ) AS total,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY fecha) FROM (
+             SELECT fecha::text AS fecha, SUM(${campo}) AS valor,
+                    SUM(contribucion) AS contribucion
+             FROM items GROUP BY fecha
+           ) fila), '[]'::json) AS serie,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+             SELECT i.bodega AS codoc, COALESCE(MAX(b.nombre), i.bodega) AS nombre,
+                    SUM(i.${campo}) AS valor
+             FROM items i LEFT JOIN bodegas b ON b.bodega = i.bodega
+             GROUP BY i.bodega
+           ) fila), '[]'::json) AS sedes,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY codigo) FROM (
+             SELECT n.codigo, n.ventas, n.cantidad, COALESCE(t.tickets, 0) AS tickets
+             FROM negocios n LEFT JOIN tickets_negocio t USING (codigo)
+           ) fila), '[]'::json) AS negocios,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+             SELECT grupo AS nombre, SUM(${campo}) AS valor
+             FROM items GROUP BY grupo ORDER BY valor DESC LIMIT 15
+           ) fila), '[]'::json) AS grupos,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+             SELECT subgrupo AS nombre, SUM(${campo}) AS valor
+             FROM items GROUP BY subgrupo ORDER BY valor DESC LIMIT 15
+           ) fila), '[]'::json) AS subgrupos,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+             SELECT proveedor AS nombre, SUM(${campo}) AS valor
+             FROM items GROUP BY proveedor ORDER BY valor DESC LIMIT 15
+           ) fila), '[]'::json) AS proveedores,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+             SELECT marca AS nombre, SUM(${campo}) AS valor
+             FROM items GROUP BY marca ORDER BY valor DESC LIMIT 15
+           ) fila), '[]'::json) AS marcas,
+           COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+             SELECT item AS referencia, MAX(desc_item) AS nombre, SUM(${campo}) AS valor
+             FROM items GROUP BY item ORDER BY valor DESC LIMIT 15
+           ) fila), '[]'::json) AS productos
+    FROM items`, values);
   return result.rows[0];
 }
 
@@ -513,6 +600,66 @@ app.get("/api/analitica/resumen", async (request, response) => {
   const rapido = request.query.rapido === "1";
 
   try {
+    const tieneFiltrosDimensionales = values.slice(3).some(Boolean);
+    if (tieneFiltrosDimensionales) {
+      try {
+        const resumenFiltrado = await consultarResumenItemsFiltrado(values, metrica);
+        if (resumenFiltrado) {
+          const {
+            total, serie, sedes, negocios, grupos,
+            subgrupos, proveedores, marcas, productos,
+          } = resumenFiltrado;
+          const definiciones = {
+            "001": { nombre: "Abarrotes", unidad: "UND" },
+            "002": { nombre: "Fruver", unidad: "KL" },
+            "003": { nombre: "Carnes", unidad: "KL" },
+          };
+          const negociosPorCodigo = new Map(negocios.map((row) => [row.codigo, row]));
+          response.set("X-Analytics-Source", "resumen-item-filtrado");
+          return response.json({
+            ok: true,
+            data: {
+              periodo,
+              metrica,
+              serie: normalizarValores(serie),
+              sedes: normalizarValores(sedes),
+              grupos: normalizarValores(grupos),
+              subgrupos: normalizarValores(subgrupos),
+              proveedores: normalizarValores(proveedores),
+              marcas: normalizarValores(marcas),
+              productos: normalizarValores(productos),
+              valorActual: numero(total.valorActual),
+              valorAnterior: 0,
+              variacion: null,
+              totalVentas: numero(total.totalVentas),
+              totalContribucion: numero(total.totalContribucion),
+              totalUnidades: numero(total.totalUnidades),
+              totalImpuestos: numero(total.totalImpuestos),
+              transacciones: numero(total.transacciones),
+              clientesActivos: numero(total.clientesActivos),
+              unidadesNegocio: Object.entries(definiciones).map(([codigo, definicion]) => {
+                const row = negociosPorCodigo.get(codigo) || {};
+                const cantidad = numero(row.cantidad);
+                const tickets = numero(row.tickets);
+                return {
+                  codigo,
+                  ...definicion,
+                  ventas: numero(row.ventas),
+                  cantidad,
+                  tickets,
+                  promedio: tickets ? cantidad / tickets : 0,
+                };
+              }),
+              parcial: rapido,
+            },
+          });
+        }
+      } catch (error) {
+        if (!["42P01", "42703"].includes(error.code)) throw error;
+        console.warn("Resumen por item incompleto; se usa la tabla transaccional.");
+      }
+    }
+
     const puedeUsarResumenDiario = rapido
       && metrica === "pesos"
       && !values.slice(3).some(Boolean);
