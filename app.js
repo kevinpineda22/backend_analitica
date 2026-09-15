@@ -650,7 +650,7 @@ app.get("/api/analitica/resumen", async (request, response) => {
                   promedio: tickets ? cantidad / tickets : 0,
                 };
               }),
-              parcial: rapido,
+              parcial: false,
             },
           });
         }
