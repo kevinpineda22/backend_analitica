@@ -446,6 +446,11 @@ async function consultarResumenItemsFiltrado(values, metrica) {
         AND ($6::text IS NULL OR subgrupo = $6)
         AND ($7::text IS NULL OR proveedor = $7)
         AND ($8::text IS NULL OR marca = $8)
+    ), bodegas AS (
+      SELECT bodega, MAX(desc_bodega) AS nombre
+      FROM merkahorro_siesa.ventas_pdv_resumen_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+      GROUP BY bodega
     ), negocios AS (
       SELECT unidad_negocio AS codigo,
              SUM(ventas) AS ventas,
