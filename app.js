@@ -5,8 +5,9 @@
    `index.js`, `server.js` ni `app.js` dentro de `src/`: Vercel podría tomar uno
    de esos como entrada en lugar de este.
 
-   Los datos salen de las tablas `merkahorro_siesa.ventas_pdv_resumen_*`, que
-   refresca el workflow `postgrest_post.yml` del repo Pagina-web_React.
+   Los datos salen de `merkahorro_siesa.ventas_pdv_resumen_*` (POS) y
+   `merkahorro_siesa.ventas_comerciales_*` (CFE/VMF), que refresca y reconcilia
+   el workflow `postgrest_post.yml` del repo Pagina-web_React.
    ============================================================================= */
 
 import "dotenv/config";
@@ -18,6 +19,7 @@ import { modoAuth } from "./src/auth/permisos.js";
 import { crearResolverAcceso } from "./src/auth/supabaseAuth.js";
 import { origenesPermitidos, originPermitido } from "./src/config/cors.js";
 import { pool, postgresConfigurado } from "./src/config/db.js";
+import { rutasComercial } from "./src/comercial/rutas.js";
 import { respuestaError } from "./src/http.js";
 import { rutasPos } from "./src/pos/rutas.js";
 
@@ -46,11 +48,14 @@ app.use(express.json({ limit: "32kb" }));
 
 /* `private`, NUNCA `public`: con datos detrás de un token, una respuesta
    guardada en el CDN de Vercel se le serviría a cualquiera sin pasar por el
-   middleware de acceso. */
-app.use("/api/analitica", (_request, response, next) => {
+   middleware de acceso. Van las dos rutas porque Express compara por
+   segmento: "/api/analitica" NO cubre "/api/analitica-comercial". */
+const cachePrivado = (_request, response, next) => {
   response.set("Cache-Control", "private, max-age=60");
   next();
-});
+};
+app.use("/api/analitica", cachePrivado);
+app.use("/api/analitica-comercial", cachePrivado);
 
 app.get("/", (_request, response) => {
   response.json({
@@ -82,6 +87,15 @@ app.use(
   "/api/analitica",
   requiereModulo("/power-bi", { modo, resolverAcceso }),
   rutasPos(pool),
+);
+
+/* Ver ventas comerciales exige el permiso de su pantalla, también cuando las
+   pide el selector "POS + CFE/VMF" del tablero POS (solo lo ven los admin, y
+   los admin pasan igual). */
+app.use(
+  "/api/analitica-comercial",
+  requiereModulo("/ventas-comerciales", { modo, resolverAcceso }),
+  rutasComercial(pool),
 );
 
 app.use((_request, response) => {
