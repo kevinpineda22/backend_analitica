@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "node --watch scripts/server.js",
     "start": "node scripts/server.js",
-    "check": "node --check app.js && node --check scripts/server.js"
+    "check": "node --check app.js && node --check scripts/server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",
