@@ -5,8 +5,9 @@
    `index.js`, `server.js` ni `app.js` dentro de `src/`: Vercel podría tomar uno
    de esos como entrada en lugar de este.
 
-   Los datos salen de `merkahorro_siesa.ventas_pdv_resumen_*` (POS) y
-   `merkahorro_siesa.ventas_comerciales_*` (CFE/VMF), que refresca y reconcilia
+   Los datos salen de `merkahorro_siesa.ventas_pdv_resumen_*` (POS),
+   `merkahorro_siesa.ventas_comerciales_*` (CFE/VMF) y
+   `merkahorro_siesa.compras_resumen_*` (compras), que refresca y reconcilia
    el workflow `postgrest_post.yml` del repo Pagina-web_React.
    ============================================================================= */
 
@@ -20,6 +21,7 @@ import { crearResolverAcceso } from "./src/auth/supabaseAuth.js";
 import { origenesPermitidos, originPermitido } from "./src/config/cors.js";
 import { pool, postgresConfigurado } from "./src/config/db.js";
 import { rutasComercial } from "./src/comercial/rutas.js";
+import { rutasCompras } from "./src/compras/rutas.js";
 import { respuestaError } from "./src/http.js";
 import { rutasPos } from "./src/pos/rutas.js";
 
@@ -48,7 +50,7 @@ app.use(express.json({ limit: "32kb" }));
 
 /* `private`, NUNCA `public`: con datos detrás de un token, una respuesta
    guardada en el CDN de Vercel se le serviría a cualquiera sin pasar por el
-   middleware de acceso. Van las dos rutas porque Express compara por
+   middleware de acceso. Va cada ruta por separado porque Express compara por
    segmento: "/api/analitica" NO cubre "/api/analitica-comercial". */
 const cachePrivado = (_request, response, next) => {
   response.set("Cache-Control", "private, max-age=60");
@@ -56,6 +58,7 @@ const cachePrivado = (_request, response, next) => {
 };
 app.use("/api/analitica", cachePrivado);
 app.use("/api/analitica-comercial", cachePrivado);
+app.use("/api/analitica-compras", cachePrivado);
 
 app.get("/", (_request, response) => {
   response.json({
@@ -96,6 +99,12 @@ app.use(
   "/api/analitica-comercial",
   requiereModulo("/ventas-comerciales", { modo, resolverAcceso }),
   rutasComercial(pool),
+);
+
+app.use(
+  "/api/analitica-compras",
+  requiereModulo("/analitica-compras", { modo, resolverAcceso }),
+  rutasCompras(pool),
 );
 
 app.use((_request, response) => {
