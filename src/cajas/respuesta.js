@@ -9,6 +9,7 @@ export function cuerpoHistorico(fila) {
   return {
     total: {
       documentos: numero(fila.total.documentos),
+      devoluciones: numero(fila.total.devoluciones),
       venta: numero(fila.total.venta),
       dias: numero(fila.total.dias),
       cajeras: numero(fila.total.cajeras),
@@ -17,18 +18,21 @@ export function cuerpoHistorico(fila) {
       diaSemana: c.diaSemana,
       hora: c.hora,
       documentos: decimales(c.documentos),
+      venta: Math.round(numero(c.venta)),
       cajeras: decimales(c.cajeras),
     })),
     cajeras: fila.cajeras.map((c) => {
       const horas = numero(c.horas);
+      const documentos = numero(c.documentos);
       return {
         cajera: c.cajera,
         bodega: c.bodega,
-        documentos: numero(c.documentos),
+        documentos,
+        devoluciones: numero(c.devoluciones),
         venta: numero(c.venta),
         dias: numero(c.dias),
         horas,
-        documentosPorHora: horas ? decimales(numero(c.documentos) / horas) : null,
+        documentosPorHora: horas ? decimales(documentos / horas) : null,
       };
     }),
     sedes: fila.sedes.map((s) => ({
