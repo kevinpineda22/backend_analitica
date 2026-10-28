@@ -7,8 +7,9 @@
 
    Los datos salen de `merkahorro_siesa.ventas_pdv_resumen_*` (POS),
    `merkahorro_siesa.ventas_comerciales_*` (CFE/VMF) y
-   `merkahorro_siesa.compras_resumen_*` (compras), que refresca y reconcilia
-   el workflow `postgrest_post.yml` del repo Pagina-web_React.
+   `merkahorro_siesa.compras_resumen_*` (compras) y
+   `merkahorro_siesa.ventas_pdv_resumen_cajeras` (cajas), que refresca y
+   reconcilia el workflow `postgrest_post.yml` del repo Pagina-web_React.
    ============================================================================= */
 
 import "dotenv/config";
@@ -21,6 +22,7 @@ import { crearResolverAcceso } from "./src/auth/supabaseAuth.js";
 import { origenesPermitidos, originPermitido } from "./src/config/cors.js";
 import { pool, postgresConfigurado } from "./src/config/db.js";
 import { rutasComercial } from "./src/comercial/rutas.js";
+import { rutasCajas } from "./src/cajas/rutas.js";
 import { rutasCompras } from "./src/compras/rutas.js";
 import { respuestaError } from "./src/http.js";
 import { rutasPos } from "./src/pos/rutas.js";
@@ -59,6 +61,7 @@ const cachePrivado = (_request, response, next) => {
 app.use("/api/analitica", cachePrivado);
 app.use("/api/analitica-comercial", cachePrivado);
 app.use("/api/analitica-compras", cachePrivado);
+app.use("/api/analitica-cajas", cachePrivado);
 
 app.get("/", (_request, response) => {
   response.json({
@@ -105,6 +108,12 @@ app.use(
   "/api/analitica-compras",
   requiereModulo("/analitica-compras", { modo, resolverAcceso }),
   rutasCompras(pool),
+);
+
+app.use(
+  "/api/analitica-cajas",
+  requiereModulo("/analitica-cajas", { modo, resolverAcceso }),
+  rutasCajas(pool),
 );
 
 app.use((_request, response) => {
