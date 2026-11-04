@@ -11,7 +11,14 @@ export const postgresConfigurado = [
 ].every((variable) => Boolean(process.env[variable]));
 
 /* Corre en Vercel: cada instancia de la función tiene su propio pool, y el
-   Postgres está detrás de un pooler que no es nuestro. Por eso `max: 1`. */
+   Postgres está detrás de un pooler que no es nuestro. Por eso `max: 1`.
+
+   Con una sola conexión, los pedidos simultáneos de una misma instancia hacen
+   fila (el tablero pide el período y el año anterior a la vez). La espera de
+   la conexión era de 10 s: detrás de una consulta de 19 s (filtro por un grupo
+   grande con "Todo") el segundo pedido fallaba con "timeout exceeded when
+   trying to connect", que el front muestra como "PostgreSQL tardó demasiado".
+   Ahora espera lo mismo que una consulta puede durar. */
 export const pool = new Pool({
   host: process.env.POSTGRES_HOST,
   port: Number(process.env.POSTGRES_PORT || 5432),
@@ -22,7 +29,7 @@ export const pool = new Pool({
     ? { rejectUnauthorized: false }
     : false,
   max: 1,
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: Number(process.env.POSTGRES_STATEMENT_TIMEOUT || 55000),
   idleTimeoutMillis: 30000,
   statement_timeout: Number(process.env.POSTGRES_STATEMENT_TIMEOUT || 55000),
   options: "-c max_parallel_workers_per_gather=0",

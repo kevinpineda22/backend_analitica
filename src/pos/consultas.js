@@ -2,8 +2,36 @@
    armado de la respuesta vive en `respuesta.js`. */
 
 import { contribucion, cteFiltrado, metricas, ventaSubtotal } from "./sql.js";
+import { fuenteItems, parametrosItems } from "./tramos.js";
 
 const campoDe = (campoValor) => (campoValor === "contribucion" ? "contribucion" : "ventas");
+
+/** CTE `por_item`: el período agregado por ítem, con el valor en `valor`. */
+const cteItems = (campo, extra = "") => `por_item AS MATERIALIZED (
+      SELECT item, MAX(desc_item) AS desc_item, MAX(grupo) AS grupo, MAX(subgrupo) AS subgrupo,
+             MAX(proveedor) AS proveedor, MAX(marca) AS marca, SUM(${campo}) AS valor, SUM(impuestos) AS impuestos
+      FROM (${fuenteItems(`item, desc_item, grupo, subgrupo, proveedor, marca, ${campo}, impuestos`, extra)}) f
+      GROUP BY item
+    )`;
+
+const topDe = (columna, alias) => `COALESCE((
+            SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+              SELECT ${columna} AS nombre, SUM(valor) AS valor
+              FROM por_item GROUP BY ${columna} ORDER BY valor DESC LIMIT 15
+            ) fila
+          ), '[]'::json) AS ${alias}`;
+
+/** Los cinco top 15 sobre `por_item`. */
+const topDimensiones = `${topDe("grupo", "grupos")},
+          ${topDe("subgrupo", "subgrupos")},
+          ${topDe("proveedor", "proveedores")},
+          ${topDe("marca", "marcas")},
+          COALESCE((
+            SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+              SELECT item AS referencia, desc_item AS nombre, valor
+              FROM por_item ORDER BY valor DESC LIMIT 15
+            ) fila
+          ), '[]'::json) AS productos`;
 
 export async function consultarFiltros(pool) {
   const result = await pool.query(`WITH periodo AS (
@@ -105,44 +133,18 @@ export async function consultarResumenDiario(pool, desde, hasta, tienda, campoVa
   return result.rows[0];
 }
 
+/**
+ * Top 15 por grupo, subgrupo, proveedor, marca y producto.
+ *
+ * Sale de los meses completos del agregado mensual y de los días sueltos del
+ * diario (ver tramos.js), agregado primero por ítem (~13 mil filas en un año)
+ * y recién después por dimensión. Antes leía el diario entero con sus arreglos:
+ * 31 s con el año 2024, y el tablero se caía.
+ */
 export async function consultarDetallesDiarios(pool, desde, hasta, tienda, campoValor = "ventas") {
   const campo = campoDe(campoValor);
-  const result = await pool.query(`WITH items AS MATERIALIZED (
-      SELECT *
-      FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
-      WHERE fecha >= $1::date AND fecha < $2::date + 1
-        AND ($3::text IS NULL OR bodega = $3)
-    )
-    SELECT COALESCE((
-            SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-              SELECT grupo AS nombre, SUM(${campo}) AS valor
-              FROM items GROUP BY grupo ORDER BY valor DESC LIMIT 15
-            ) fila
-          ), '[]'::json) AS grupos,
-          COALESCE((
-            SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-              SELECT subgrupo AS nombre, SUM(${campo}) AS valor
-              FROM items GROUP BY subgrupo ORDER BY valor DESC LIMIT 15
-            ) fila
-          ), '[]'::json) AS subgrupos,
-          COALESCE((
-            SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-              SELECT proveedor AS nombre, SUM(${campo}) AS valor
-              FROM items GROUP BY proveedor ORDER BY valor DESC LIMIT 15
-            ) fila
-          ), '[]'::json) AS proveedores,
-          COALESCE((
-            SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-              SELECT marca AS nombre, SUM(${campo}) AS valor
-              FROM items GROUP BY marca ORDER BY valor DESC LIMIT 15
-            ) fila
-          ), '[]'::json) AS marcas,
-          COALESCE((
-            SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-              SELECT item AS referencia, MAX(desc_item) AS nombre, SUM(${campo}) AS valor
-              FROM items GROUP BY item ORDER BY valor DESC LIMIT 15
-            ) fila
-          ), '[]'::json) AS productos`, [desde, hasta, tienda || null]);
+  const result = await pool.query(`WITH ${cteItems(campo)}
+    SELECT ${topDimensiones}`, parametrosItems(desde, hasta, tienda));
   return result.rows[0];
 }
 
@@ -231,6 +233,86 @@ export async function consultarResumenItemsFiltrado(pool, values, metrica) {
   return result.rows[0];
 }
 
+/* Valor de cada métrica sobre `negocio_diario` (que ya trae tickets por día,
+   sede y unidad: un ticket es de un solo día, así que sumarlos no cuenta doble). */
+const VALOR_NEGOCIO = {
+  pesos: "COALESCE(SUM(n.ventas), 0)",
+  contribucion: "COALESCE(SUM(n.contribucion), 0)",
+  unidades: "COALESCE(SUM(n.unidades), 0)",
+  tickets: "COALESCE(SUM(n.tickets), 0)",
+  ticket_promedio: "COALESCE(SUM(n.ventas) / NULLIF(SUM(n.tickets), 0), 0)",
+};
+const TOP_NEGOCIO = { pesos: "ventas", contribucion: "contribucion", unidades: "unidades" };
+
+/**
+ * Filtro SOLO por unidad de negocio (con o sin tienda), cualquier métrica.
+ *
+ * Totales, serie y sedes de `ventas_pdv_resumen_negocio_diario`; clientes
+ * distintos de `ventas_pdv_resumen_negocio_clientes`; top 15 del agregado por
+ * ítem. Antes salía de los arreglos de `item_diario`: 83 s con Abarrotes en
+ * 2024. Clientes y ticket promedio también salen acá, sin la transaccional.
+ *
+ * @param {Array} values Los 8 de `parametros()`: solo se usan desde, hasta, tienda y unidad.
+ */
+export async function consultarResumenNegocioFiltrado(pool, values, metrica) {
+  const [desde, hasta, tienda, unidad] = values;
+  const esClientes = metrica === "clientes";
+  const valor = esClientes ? "COALESCE(MAX(c.clientes), 0)" : VALOR_NEGOCIO[metrica];
+  if (!valor) throw new Error(`La metrica ${metrica} no tiene resumen por unidad de negocio.`);
+  const campoTop = TOP_NEGOCIO[metrica];
+
+  const result = await pool.query(`WITH negocio AS MATERIALIZED (
+      SELECT fecha, bodega, ventas, contribucion, unidades, tickets
+      FROM merkahorro_siesa.ventas_pdv_resumen_negocio_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+        AND ($3::text IS NULL OR bodega = $3) AND unidad_negocio = $6
+    ), clientes AS MATERIALIZED (
+      SELECT c.fecha, c.bodega, x.cliente
+      FROM merkahorro_siesa.ventas_pdv_resumen_negocio_clientes c
+      CROSS JOIN LATERAL UNNEST(c.clientes) AS x(cliente)
+      WHERE c.fecha >= $1::date AND c.fecha < $2::date + 1
+        AND ($3::text IS NULL OR c.bodega = $3) AND c.unidad_negocio = $6
+    ), clientes_dia AS (
+      SELECT fecha, COUNT(DISTINCT cliente)::bigint AS clientes FROM clientes GROUP BY fecha
+    ), clientes_sede AS (
+      SELECT bodega, COUNT(DISTINCT cliente)::bigint AS clientes FROM clientes GROUP BY bodega
+    ), bodegas AS (
+      SELECT bodega, MAX(desc_bodega) AS nombre
+      FROM merkahorro_siesa.ventas_pdv_resumen_diario
+      WHERE fecha >= $1::date AND fecha < $2::date + 1
+      GROUP BY bodega
+    ), ${cteItems(campoTop || "ventas", "AND unidad_negocio = $6")},
+    total AS (
+      SELECT COALESCE(SUM(ventas), 0) AS ventas, COALESCE(SUM(contribucion), 0) AS contribucion,
+             COALESCE(SUM(unidades), 0) AS unidades, COALESCE(SUM(tickets), 0) AS tickets
+      FROM negocio
+    )
+    SELECT JSON_BUILD_OBJECT(
+            'totalVentas', t.ventas,
+            'totalContribucion', t.contribucion,
+            'totalUnidades', t.unidades,
+            'totalImpuestos', (SELECT COALESCE(SUM(impuestos), 0) FROM por_item),
+            'transacciones', t.tickets,
+            'clientesActivos', (SELECT COUNT(DISTINCT cliente)::bigint FROM clientes),
+            'valorActual', ${esClientes ? "(SELECT COUNT(DISTINCT cliente)::bigint FROM clientes)" : `(SELECT ${valor} FROM negocio n)`}
+          ) AS total,
+          COALESCE((SELECT JSON_AGG(fila ORDER BY fecha) FROM (
+            SELECT n.fecha::text AS fecha, ${valor} AS valor, SUM(n.contribucion) AS contribucion
+            FROM negocio n LEFT JOIN clientes_dia c ON c.fecha = n.fecha
+            GROUP BY n.fecha
+          ) fila), '[]'::json) AS serie,
+          COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
+            SELECT n.bodega AS codoc, COALESCE(MAX(b.nombre), n.bodega) AS nombre, ${valor} AS valor
+            FROM negocio n LEFT JOIN clientes_sede c ON c.bodega = n.bodega LEFT JOIN bodegas b ON b.bodega = n.bodega
+            GROUP BY n.bodega
+          ) fila), '[]'::json) AS sedes,
+          JSON_BUILD_ARRAY(JSON_BUILD_OBJECT('codigo', $6::text, 'ventas', t.ventas, 'cantidad', t.unidades, 'tickets', t.tickets)) AS negocios,
+          ${campoTop ? topDimensiones : `'[]'::json AS grupos, '[]'::json AS subgrupos, '[]'::json AS proveedores,
+          '[]'::json AS marcas, '[]'::json AS productos`}
+    FROM total t`, [...parametrosItems(desde, hasta, tienda), unidad]);
+  return result.rows[0];
+}
+
 export async function consultarAnalisisKpiDiario(pool, desde, hasta, tienda, metrica) {
   if (metrica === "clientes") {
     const result = await pool.query(`WITH diario AS MATERIALIZED (
@@ -266,22 +348,17 @@ export async function consultarAnalisisKpiDiario(pool, desde, hasta, tienda, met
   const valor = agregados.denominador
     ? `COALESCE(SUM(${agregados.numerador}) / NULLIF(SUM(${agregados.denominador}), 0), 0)`
     : `COALESCE(SUM(${agregados.numerador}), 0)`;
-  const detallesUnidades = metrica === "unidades" ? `,
+  // Unidades trae además grupos y productos: del agregado por ítem (mensual +
+  // puntas del diario), como el top 15 de ventas. Leer el diario entero eran 12 s por año.
+  const conItems = metrica === "unidades";
+  const detallesUnidades = conItems ? `,
+            ${topDe("grupo", "grupos")},
             COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-              SELECT grupo AS nombre, SUM(unidades) AS valor
-              FROM items GROUP BY grupo ORDER BY valor DESC LIMIT 15
-            ) fila), '[]'::json) AS grupos,
-            COALESCE((SELECT JSON_AGG(fila ORDER BY valor DESC) FROM (
-              SELECT item AS referencia, MAX(desc_item) AS nombre, SUM(unidades) AS valor
-              FROM items GROUP BY item ORDER BY valor DESC LIMIT 15
+              SELECT item AS referencia, desc_item AS nombre, valor
+              FROM por_item ORDER BY valor DESC LIMIT 15
             ) fila), '[]'::json) AS productos`
     : ", '[]'::json AS grupos, '[]'::json AS productos";
-  const itemsCte = metrica === "unidades" ? `, items AS MATERIALIZED (
-      SELECT *
-      FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
-      WHERE fecha >= $1::date AND fecha < $2::date + 1
-        AND ($3::text IS NULL OR bodega = $3)
-    )` : "";
+  const itemsCte = conItems ? `, ${cteItems("unidades")}` : "";
 
   const result = await pool.query(`WITH diario AS MATERIALIZED (
       SELECT *
@@ -298,7 +375,7 @@ export async function consultarAnalisisKpiDiario(pool, desde, hasta, tienda, met
             SELECT bodega AS codoc, MAX(desc_bodega) AS nombre, ${valor} AS valor
             FROM diario GROUP BY bodega
           ) fila), '[]'::json) AS sedes
-          ${detallesUnidades}`, [desde, hasta, tienda || null]);
+          ${detallesUnidades}`, conItems ? parametrosItems(desde, hasta, tienda) : [desde, hasta, tienda || null]);
   return result.rows[0];
 }
 
@@ -408,44 +485,54 @@ export async function consultarTransaccionalCompleto(pool, values, metrica) {
   return result.rows[0];
 }
 
+/**
+ * Operación por hora desde `ventas_pdv_resumen_hora` (una fila por día, sede,
+ * hora y caja: 40 mil por año) y no desde `ventas_pdv_resumen_horario` (una
+ * por factura: 2,5 M por año, 14 s cada una de las tres llamadas del panel).
+ *
+ * Mismos números: la duración promedio es la suma de duraciones de facturas
+ * de más de una línea ÷ cuántas son, y los productos promedio, la suma de
+ * productos ÷ tickets. Eso es exactamente lo que hacían los AVG por factura.
+ */
 export async function consultarOperacionHoraria(pool, desde, hasta, tienda) {
+  const duracion = "SUM(duracion_suma)::numeric / NULLIF(SUM(duracion_tickets), 0)";
   const result = await pool.query(`WITH base AS MATERIALIZED (
-      SELECT *
-      FROM merkahorro_siesa.ventas_pdv_resumen_horario
+      SELECT fecha, bodega, desc_bodega, hora, caja, ventas, tickets, productos, duracion_suma, duracion_tickets
+      FROM merkahorro_siesa.ventas_pdv_resumen_hora
       WHERE fecha >= $1::date AND fecha < $2::date + 1
         AND ($3::text IS NULL OR bodega = $3)
     ), horas AS (
       SELECT hora,
-             SUM(venta) AS ventas,
-             COUNT(*)::bigint AS tickets,
+             SUM(ventas) AS ventas,
+             SUM(tickets)::bigint AS tickets,
              COUNT(DISTINCT caja)::integer AS cajas,
-             AVG(duracion_segundos) FILTER (WHERE lineas > 1) AS duracion,
+             ${duracion} AS duracion,
              SUM(productos)::bigint AS productos
       FROM base GROUP BY hora
     ), dias AS (
-      SELECT fecha::text AS fecha, SUM(venta) AS ventas,
-             COUNT(*)::bigint AS tickets,
+      SELECT fecha::text AS fecha, SUM(ventas) AS ventas,
+             SUM(tickets)::bigint AS tickets,
              COUNT(DISTINCT caja)::integer AS cajas
       FROM base GROUP BY fecha
     ), tiendas AS (
       SELECT bodega AS codigo, MAX(desc_bodega) AS nombre,
-             SUM(venta) AS ventas, COUNT(*)::bigint AS tickets,
+             SUM(ventas) AS ventas, SUM(tickets)::bigint AS tickets,
              COUNT(DISTINCT caja)::integer AS cajas,
-             AVG(duracion_segundos) FILTER (WHERE lineas > 1) AS duracion
+             ${duracion} AS duracion
       FROM base GROUP BY bodega
     ), cajas AS (
       SELECT bodega AS codigo_tienda, MAX(desc_bodega) AS tienda, caja,
-             SUM(venta) AS ventas, COUNT(*)::bigint AS tickets,
-             AVG(duracion_segundos) FILTER (WHERE lineas > 1) AS duracion,
+             SUM(ventas) AS ventas, SUM(tickets)::bigint AS tickets,
+             ${duracion} AS duracion,
              SUM(productos)::bigint AS productos
       FROM base GROUP BY bodega, caja
     )
     SELECT JSON_BUILD_OBJECT(
-             'ventas', COALESCE(SUM(venta), 0),
-             'tickets', COUNT(*)::bigint,
+             'ventas', COALESCE(SUM(ventas), 0),
+             'tickets', COALESCE(SUM(tickets), 0)::bigint,
              'cajas', COUNT(DISTINCT (bodega, caja))::integer,
-             'duracionPromedio', COALESCE(AVG(duracion_segundos) FILTER (WHERE lineas > 1), 0),
-             'productosPromedio', COALESCE(AVG(productos), 0)
+             'duracionPromedio', COALESCE(${duracion}, 0),
+             'productosPromedio', COALESCE(SUM(productos)::numeric / NULLIF(SUM(tickets), 0), 0)
            ) AS total,
            COALESCE((SELECT JSON_AGG(fila ORDER BY hora) FROM (
              SELECT hora, ventas, tickets, cajas,

@@ -110,9 +110,10 @@ app.use(
   rutasCompras(pool),
 );
 
+/* Cajas es una pestaña de Ventas POS: quien ve POS ve sus cajas. */
 app.use(
   "/api/analitica-cajas",
-  requiereModulo("/analitica-cajas", { modo, resolverAcceso }),
+  requiereModulo("/power-bi", { modo, resolverAcceso }),
   rutasCajas(pool),
 );
 

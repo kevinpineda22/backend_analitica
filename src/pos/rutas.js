@@ -10,6 +10,7 @@ import {
   consultarOperacionHoraria,
   consultarResumenDiario,
   consultarResumenItemsFiltrado,
+  consultarResumenNegocioFiltrado,
   consultarTransaccionalCompleto,
   consultarTransaccionalRapido,
 } from "./consultas.js";
@@ -93,12 +94,20 @@ export function rutasPos(pool) {
     const values = parametros(request.query, periodo.desde, periodo.hasta);
     const rapido = request.query.rapido === "1";
     const tienda = values[2];
-    const fuente = elegirFuente({ metrica, rapido, conFiltros: values.slice(3).some(Boolean) });
+    const fuente = elegirFuente({
+      metrica,
+      rapido,
+      conFiltros: values.slice(3).some(Boolean),
+      soloUnidad: Boolean(values[3]) && !values.slice(4).some(Boolean),
+    });
     const campoValor = metrica === "contribucion" ? "contribucion" : "ventas";
 
     try {
       let data;
-      if (fuente === "item-filtrado") {
+      if (fuente === "negocio-filtrado") {
+        const fila = await consultarResumenNegocioFiltrado(pool, values, metrica);
+        data = cuerpoResumen({ periodo, metrica, ...fila, parcial: false });
+      } else if (fuente === "item-filtrado") {
         const fila = await consultarResumenItemsFiltrado(pool, values, metrica);
         data = cuerpoResumen({ periodo, metrica, ...fila, parcial: false });
       } else if (fuente === "diario-rapido") {

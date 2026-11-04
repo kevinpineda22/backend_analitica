@@ -5,6 +5,7 @@ import { fechaValida, validarPeriodo } from "../src/http.js";
 import { elegirFuente } from "../src/pos/fuente.js";
 import { cuerpoKpi, cuerpoResumen, unidadesNegocio } from "../src/pos/respuesta.js";
 import { parametros } from "../src/pos/sql.js";
+import { parametrosItems, tramosMensuales } from "../src/pos/tramos.js";
 
 describe("elegirFuente", () => {
   const casos = [
@@ -28,6 +29,30 @@ describe("elegirFuente", () => {
       assert.equal(elegirFuente({ metrica, rapido, conFiltros }), fuente);
     });
   }
+  it("solo unidad de negocio: resúmenes por unidad para TODAS las métricas", () => {
+    for (const metrica of ["pesos", "unidades", "tickets", "clientes", "ticket_promedio"]) {
+      assert.equal(elegirFuente({ metrica, rapido: true, conFiltros: true, soloUnidad: true }), "negocio-filtrado");
+    }
+  });
+});
+
+describe("tramosMensuales", () => {
+  it("un año entero sale todo del mensual", () => {
+    assert.deepEqual(tramosMensuales("2024-01-01", "2024-12-31"), { mesDesde: "2024-01-01", mesHasta: "2025-01-01" });
+  });
+  it("las puntas que no son mes completo quedan para el diario", () => {
+    assert.deepEqual(tramosMensuales("2024-01-15", "2024-03-10"), { mesDesde: "2024-02-01", mesHasta: "2024-03-01" });
+  });
+  it("fin de febrero bisiesto cuenta como mes completo", () => {
+    assert.deepEqual(tramosMensuales("2024-02-01", "2024-02-29"), { mesDesde: "2024-02-01", mesHasta: "2024-03-01" });
+  });
+  it("sin un mes completo, el mensual no aporta nada", () => {
+    assert.deepEqual(tramosMensuales("2026-10-01", "2026-10-29"), { mesDesde: "2026-10-30", mesHasta: "2026-10-30" });
+    assert.deepEqual(tramosMensuales("2024-01-15", "2024-01-20"), { mesDesde: "2024-01-21", mesHasta: "2024-01-21" });
+  });
+  it("los parámetros traen la tienda o null", () => {
+    assert.deepEqual(parametrosItems("2024-01-15", "2024-03-10", ""), ["2024-01-15", "2024-03-10", null, "2024-02-01", "2024-03-01"]);
+  });
 });
 
 describe("unidadesNegocio", () => {

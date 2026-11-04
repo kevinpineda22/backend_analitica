@@ -6,6 +6,8 @@
    transaccional `ventas_pdv_detalle` puede tardar segundos. Esta regla elige la
    más barata que tenga lo que la consulta necesita.
 
+   - `negocio-filtrado`: el único filtro (además de la tienda) es la unidad
+     de negocio. Sirve todas las métricas desde los resúmenes por unidad.
    - `item-filtrado`: hay filtro por dimensión y la métrica se puede sumar
      por ítem. Clientes y tickets NO: un mismo ticket o cliente aparece en
      varios ítems, y sumar los contaría dos veces.
@@ -27,7 +29,14 @@
 const SUMABLES_POR_ITEM = ["pesos", "contribucion", "unidades"];
 const DIARIAS = ["pesos", "contribucion"];
 
-export function elegirFuente({ metrica, rapido, conFiltros }) {
+/**
+ * @param {boolean} conFiltros  Hay filtro de unidad, grupo, subgrupo, proveedor o marca.
+ * @param {boolean} soloUnidad  El único de esos filtros es la unidad de negocio:
+ *   sale de `negocio_diario` + `negocio_clientes` para CUALQUIER métrica
+ *   (2026-11-04: Abarrotes en 2024 tardaba 83 s desde los arreglos por ítem).
+ */
+export function elegirFuente({ metrica, rapido, conFiltros, soloUnidad = false }) {
+  if (soloUnidad) return "negocio-filtrado";
   if (conFiltros) {
     return SUMABLES_POR_ITEM.includes(metrica) ? "item-filtrado" : "transaccional";
   }
@@ -38,6 +47,7 @@ export function elegirFuente({ metrica, rapido, conFiltros }) {
 
 /** Valor del header `X-Analytics-Source` (lo leen los diagnósticos, no el front). */
 export const HEADER_FUENTE = {
+  "negocio-filtrado": "resumen-negocio-filtrado",
   "item-filtrado": "resumen-item-filtrado",
   "diario-rapido": "resumen-diario",
   "diario-detalle": "resumen-diario",

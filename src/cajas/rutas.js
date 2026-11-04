@@ -3,7 +3,7 @@
 import express from "express";
 import { respuestaError, validarPeriodo } from "../http.js";
 import { consultarFiltros, consultarHistorico } from "./consultas.js";
-import { leerBodega, motivoRangoInvalido } from "./reglas.js";
+import { leerBodega, leerCaja, motivoRangoInvalido } from "./reglas.js";
 import { cuerpoHistorico } from "./respuesta.js";
 
 export function rutasCajas(pool) {
@@ -27,10 +27,11 @@ export function rutasCajas(pool) {
     const motivo = motivoRangoInvalido(periodo);
     if (motivo) return response.status(400).json({ ok: false, error: motivo });
     const bodega = leerBodega(request.query.bodega);
+    const caja = leerCaja(request.query.caja, bodega);
 
     try {
-      const fila = await consultarHistorico(pool, { ...periodo, bodega });
-      return response.json({ ok: true, data: { periodo, bodega, ...cuerpoHistorico(fila) } });
+      const fila = await consultarHistorico(pool, { ...periodo, bodega, caja });
+      return response.json({ ok: true, data: { periodo, bodega, caja, ...cuerpoHistorico(fila) } });
     } catch (error) {
       return respuestaError(response, error, "No fue posible consultar el historico de cajas.");
     }
