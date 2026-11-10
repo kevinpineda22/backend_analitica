@@ -38,16 +38,21 @@ export function tramosMensuales(desde, hasta) {
  * Filas por ítem del período, del mensual y del diario, con las columnas
  * pedidas. Usa $1 desde, $2 hasta, $3 tienda, $4 mesDesde, $5 mesHasta;
  * `extra` agrega condiciones con parámetros propios (p. ej. la unidad en $6).
+ *
+ * `base` corre la numeración, para usar la fuente dos veces en una consulta
+ * (período y año anterior). `columnasDiario` sirve cuando una columna se llama
+ * distinto en cada tabla (`mes` contra `fecha`).
  */
-export function fuenteItems(columnas, extra = "") {
+export function fuenteItems(columnas, extra = "", { base = 0, columnasDiario = columnas } = {}) {
+  const [desde, hasta, tienda, mesDesde, mesHasta] = [1, 2, 3, 4, 5].map((n) => `$${n + base}`);
   return `
     SELECT ${columnas} FROM merkahorro_siesa.ventas_pdv_resumen_item_mensual
-    WHERE mes >= $4::date AND mes < $5::date
-      AND ($3::text IS NULL OR bodega = $3) ${extra}
+    WHERE mes >= ${mesDesde}::date AND mes < ${mesHasta}::date
+      AND (${tienda}::text IS NULL OR bodega = ${tienda}) ${extra}
     UNION ALL
-    SELECT ${columnas} FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
-    WHERE ((fecha >= $1::date AND fecha < $4::date) OR (fecha >= $5::date AND fecha < $2::date + 1))
-      AND ($3::text IS NULL OR bodega = $3) ${extra}`;
+    SELECT ${columnasDiario} FROM merkahorro_siesa.ventas_pdv_resumen_item_diario
+    WHERE ((fecha >= ${desde}::date AND fecha < ${mesDesde}::date) OR (fecha >= ${mesHasta}::date AND fecha < ${hasta}::date + 1))
+      AND (${tienda}::text IS NULL OR bodega = ${tienda}) ${extra}`;
 }
 
 /** Parámetros $1..$5 de `fuenteItems`. */
