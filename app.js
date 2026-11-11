@@ -26,6 +26,7 @@ import { rutasCajas } from "./src/cajas/rutas.js";
 import { rutasCompras } from "./src/compras/rutas.js";
 import { respuestaError } from "./src/http.js";
 import { rutasCategorias } from "./src/categorias/rutas.js";
+import { rutasClientes } from "./src/clientes/rutas.js";
 import { rutasDiarias } from "./src/diarias/rutas.js";
 import { rutasItems } from "./src/items/rutas.js";
 import { rutasPos } from "./src/pos/rutas.js";
@@ -68,6 +69,7 @@ app.use("/api/analitica-cajas", cachePrivado);
 app.use("/api/analitica-items", cachePrivado);
 app.use("/api/analitica-diaria", cachePrivado);
 app.use("/api/analitica-categorias", cachePrivado);
+app.use("/api/analitica-clientes", cachePrivado);
 
 app.get("/", (_request, response) => {
   response.json({
@@ -143,6 +145,14 @@ app.use(
   "/api/analitica-categorias",
   requiereModulo("/power-bi", { modo, resolverAcceso }),
   rutasCategorias(pool),
+);
+
+/* Segmentación de clientes, otra pestaña de Ventas POS. Lee el agregado
+   `ventas_pdv_resumen_cliente_mensual`: instalarlo y cargarlo ANTES. */
+app.use(
+  "/api/analitica-clientes",
+  requiereModulo("/power-bi", { modo, resolverAcceso }),
+  rutasClientes(pool),
 );
 
 app.use((_request, response) => {
