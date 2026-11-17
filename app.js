@@ -29,6 +29,7 @@ import { respuestaError } from "./src/http.js";
 import { rutasCategorias } from "./src/categorias/rutas.js";
 import { rutasClientes } from "./src/clientes/rutas.js";
 import { rutasDiarias } from "./src/diarias/rutas.js";
+import { rutasInventario } from "./src/inventario/rutas.js";
 import { rutasItems } from "./src/items/rutas.js";
 import { rutasPos } from "./src/pos/rutas.js";
 
@@ -71,6 +72,7 @@ app.use("/api/analitica-items", cachePrivado);
 app.use("/api/analitica-diaria", cachePrivado);
 app.use("/api/analitica-categorias", cachePrivado);
 app.use("/api/analitica-clientes", cachePrivado);
+app.use("/api/analitica-inventario", cachePrivado);
 
 app.get("/", (_request, response) => {
   response.json({
@@ -154,6 +156,15 @@ app.use(
   "/api/analitica-clientes",
   requiereModulo("/power-bi", { modo, resolverAcceso }),
   rutasClientes(pool),
+);
+
+/* Inventario por sede, otra pestaña de Ventas POS. Lee la foto diaria
+   `inventario_bodega_diario` (workflow inventario_bodegas del front):
+   instalar y tomar la primera foto ANTES. */
+app.use(
+  "/api/analitica-inventario",
+  requiereModulo("/power-bi", { modo, resolverAcceso }),
+  rutasInventario(pool),
 );
 
 app.use((_request, response) => {
