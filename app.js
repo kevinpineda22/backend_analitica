@@ -158,12 +158,12 @@ app.use(
   rutasClientes(pool),
 );
 
-/* Inventario por sede, otra pestaña de Ventas POS. Lee la foto diaria
-   `inventario_bodega_diario` (workflow inventario_bodegas del front):
-   instalar y tomar la primera foto ANTES. */
+/* Inventario por sede: módulo propio de la Analítica, con su permiso
+   (/analitica-inventarios), no una pestaña de Ventas POS. Lee la foto diaria
+   `inventario_bodega_diario` (workflow inventario_bodegas del front). */
 app.use(
   "/api/analitica-inventario",
-  requiereModulo("/power-bi", { modo, resolverAcceso }),
+  requiereModulo("/analitica-inventarios", { modo, resolverAcceso }),
   rutasInventario(pool),
 );
 
