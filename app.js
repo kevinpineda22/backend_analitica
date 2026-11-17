@@ -10,6 +10,7 @@
    `merkahorro_siesa.compras_resumen_*` (compras) y
    `merkahorro_siesa.ventas_pdv_resumen_cajeras` (cajas), que refresca y
    reconcilia el workflow `postgrest_post.yml` del repo Pagina-web_React.
+   
    ============================================================================= */
 
 import "dotenv/config";
